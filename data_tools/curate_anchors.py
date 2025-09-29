@@ -101,15 +101,15 @@ Acceptance Tests (run locally)
    - Prints diagnostic with splits (e.g., ['harmful','benign']), kept > 0, and writes ≤ 500 anchors.
 
 2) Disable step filter:
-   $ python data_tools/curate_anchors.py --no-step-filter --out /tmp/anchors_nostep.jsonl
+   $ python data_tools/curate_anchors.py --no-step-filter --out data/anchors/anchors_nostep.jsonl
    - Kept should be ≥ test #1; file is valid JSONL.
 
 3) AdvBench gated (no token):
-   $ python data_tools/curate_anchors.py --out /tmp/anchors_jbb_only.jsonl
+   $ python data_tools/curate_anchors.py --out data/anchors/anchors_jbb_only.jsonl
    - Warns about AdvBench; still writes anchors from JBB.
 
 4) AdvBench with token:
-   $ HUGGINGFACE_HUB_TOKEN=<token> python data_tools/curate_anchors.py --hf-token <token> --out /tmp/anchors_full.jsonl
+   $ HUGGINGFACE_HUB_TOKEN=<token> python data_tools/curate_anchors.py --hf-token <token> --out data/anchors/anchors_full.jsonl
    - Includes anchors from both JBB and AdvBench (if accessible).
 
 5) Text key override:
