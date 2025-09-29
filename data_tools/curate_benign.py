@@ -86,7 +86,7 @@ Acceptance Tests
    - No lines match EXCLUDE_RE; no example with toxicity > 0.2 included.
 
 3) Both (default):
-   $ python scripts/curate_benign.py
+   $ python data_tools/curate_benign.py
    - Produces the default two files; prints two "[done] ..." summaries.
 
 Implementation Hints
