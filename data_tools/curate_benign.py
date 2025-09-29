@@ -76,12 +76,12 @@ Behavior & Logging
 Acceptance Tests
 ----------------
 1) Dolly only (small sample):
-   $ python scripts/curate_benign.py --run dolly --n-dolly 100 --out-dolly /tmp/dolly.jsonl
+   $ python scripts/curate_benign.py --run dolly --n-dolly 100 --out-dolly data/eval/dolly.jsonl
    - File exists with ~100 lines; each line has label "benign" and source "dolly-15k".
    - No lines match EXCLUDE_RE terms (case-insensitive).
 
 2) RTP only (tox filter):
-   $ python scripts/curate_benign.py --run rtp --n-rtp 200 --out-rtp /tmp/rtp.jsonl --tox-thresh 0.2
+   $ python scripts/curate_benign.py --run rtp --n-rtp 200 --out-rtp data/eval/rtp.jsonl --tox-thresh 0.2
    - File exists with ~200 lines; label "benign", source "real-toxicity-prompts".
    - No lines match EXCLUDE_RE; no example with toxicity > 0.2 included.
 
