@@ -70,16 +70,16 @@ def load_ds(ds: str, config: Optional[str], split: str, token: Optional[str], tr
 
 
 def dump_generic(
-    ds: str,
-    out_path: str,
-    n: int,
-    *,
-    config: Optional[str] = None,
-    split: Optional[str] = None,
-    token: Optional[str] = None,
-    trust_remote_code: bool = False,
-    label: str = "attack",
-    source_tag: Optional[str] = None,
+   ds: str,
+   out_path: str,
+   n: int,
+   *,
+   config: Optional[str] = None,
+   split: Optional[str] = None,
+   token: Optional[str] = None,
+   trust_remote_code: bool = False,
+   label: str = "attack",
+   source_tag: Optional[str] = None,
 ) -> int:
     # Resolve split
     if split is None:
