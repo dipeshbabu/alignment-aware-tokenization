@@ -116,8 +116,61 @@ MIN_LEN = 8  # optional nicety (enforced here)
 
 # Keep this exclude list stable; collaborators should not weaken it without review.
 EXCLUDE_RE = re.compile(
-    r"\b(weapon|kill|poison|explosive|assault|harm|suicide|self-harm|drugs|terror|hate|extrem|violent)\b",
-    re.I
+    r"""
+\b(
+    # --- your original roots (kept) ---
+    weapon(s)?|
+    kill(ed|ing|s)?|
+    poison(ed|ing|s)?|
+    explosiv\w*|
+    assault(s|ed|ing)?|
+    harm(ful|ing|s)?|self[-\s]?harm|
+    suicide\w*|
+    drug(s)?|
+    terror(ism|ist|ists)?|
+    hate(ful|speech)?|
+    extrem\w*|
+    violent\w*|
+
+    # --- weapons / violence / war (present in your data) ---
+    bomb(er|s)?|grenade(s)?|
+    gun(s)?|rifle(s)?|bullet(s)?|
+    sword(s)?|knife(s)?|axe(s)?|gatling|
+    nuclear\s*bomb|
+    war(s|fare)?|
+    genocid\w*|
+    blood(shed|thirsty)?|
+    dead|death|
+    attack(s|ed|ing)?|
+    murder\w*|
+    brutalit\w*|
+
+    # --- extremism / terrorism / racism (present) ---
+    nazi\w*|hitler\w*|gestapo|
+    isis\b|al[-\s]?qaeda|qaida\b|jihad\w*|
+    kkk\b|
+    white\s*supremac\w*|
+    racis\w*|
+
+    # --- sexual / explicit (present) ---
+    porn\w*|
+    sex(ting)?|
+    semen\b|genital(s)?|breast(s)?|
+    penis\b|vagina(s)?|
+    fuck\w*|bitch\w*|
+
+    # --- drugs / alcohol (present) ---
+    cocaine|heroin|
+    opioid(s)?|opiate(s)?|
+    meth(amphetamine|amphetamines)?|
+    lsd\b|
+    marijuana|cannabis|
+    nicotine|
+    alcohol(ic)?|
+    beer(s)?|vodka|whiskey|rum|gin|wine|liquor
+)\b
+""",
+    re.I | re.X,
 )
 
 def _ensure_parent_dir(path: str) -> None:
@@ -151,7 +204,7 @@ def dump_dolly(n: int, out: str, seed: int = SEED) -> None:
     written = _write_jsonl(rows, out, source="dolly-15k")
     print(f"[done] dolly → {out} ({written} lines)")
 
-def dump_rtp(n: int, out: str, tox_thresh: float = 0.2, seed: int = SEED) -> None:
+def dump_rtp(n: int, out: str, tox_thresh: float = 0.05, seed: int = SEED) -> None:
     ds = load_dataset("allenai/real-toxicity-prompts", split="train")
     rows = []
     for ex in ds:
@@ -187,7 +240,7 @@ def main() -> None:
     parser.add_argument("--out-rtp", type=str, default="data/eval/benign_rtp_extra_500.jsonl", help="Output path for RTP prompts")
     parser.add_argument("--run", choices=["both", "dolly", "rtp"], default="both", help="Which dataset(s) to curate")
     parser.add_argument("--seed", type=int, default=SEED, help="Random seed")
-    parser.add_argument("--tox-thresh", type=float, default=0.2, help="Toxicity threshold for RTP")
+    parser.add_argument("--tox-thresh", type=float, default=0.05, help="Toxicity threshold for RTP")
     args = parser.parse_args()
 
     if args.run in ("both", "dolly") and args.n_dolly > 0:
@@ -197,4 +250,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    

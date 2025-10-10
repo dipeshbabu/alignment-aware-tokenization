@@ -1,1 +1,14 @@
+# ignore any JSONL files inside data/unlabeled/
 data/unlabeled/*.jsonl
+
+# ignore the benign-curation notebook
+data_tools/curate_benign.ipynb
+
+# ignore the unique-words output text file
+data/eval/unique_words_all.txt
+
+# ignore the final prompts for benign data curation
+data/eval/benign_all_formatted.txt
+
+# ignore virtual environment folder
+.venv
