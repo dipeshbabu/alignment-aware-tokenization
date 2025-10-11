@@ -1,4 +1,6 @@
 # tokenizers/bpe_search.py
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
 """
 Drift-aware bi-level BPE merge search.
 
@@ -42,6 +44,7 @@ import json
 import math
 import os
 import random
+from re import search
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -56,6 +59,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenize
 
 from eval.eval_perplexity import perplexity as eval_ppl
 from eval.eval_drift import drift_score as eval_drift
+from models.embed_remap import remap_embeddings
 
 
 # ----------------------------
@@ -255,6 +259,29 @@ class TokenizerEditor:
         except Exception:
             pass
         return tok
+
+    def save_and_optionally_remap(
+        base_model_dir: str,
+        edited_tok_dir: Path,
+        remap_out: str | None,
+        tie_lm_head: bool = True
+    ) -> str:
+        """
+        If remap_out is provided (non-empty), run remap_embeddings to create a stable
+        model+tokenizer bundle aligned to the edited tokenizer. Returns the directory
+        path to use going forward (remapped dir if remapped, else edited_tok_dir).
+        """
+        if remap_out:
+            os.makedirs(remap_out, exist_ok=True)
+            remap_embeddings(
+                base_model_dir=base_model_dir,
+                new_tokenizer_dir=str(edited_tok_dir),
+                save_dir=remap_out,
+                tie_lm_head=tie_lm_head,
+            )
+            return remap_out
+        # If not remapping to a persistent dir, just keep the edited tokenizer dir
+        return str(edited_tok_dir)
 
 
 # ----------------------------
@@ -603,10 +630,39 @@ class BPESearch:
             # Accept/reject
             if (self.best_score is None) or (cand_res.J < self.best_score.J):
                 print(
-                    f"  -> accepted (J ↓ {self.best_score.J:.4f} → {cand_res.J:.4f})" if self.best_score else "  -> accepted")
+                    f"  -> accepted (J ↓ {self.best_score.J:.4f} → {cand_res.J:.4f})"
+                    if self.best_score else "  -> accepted"
+                )
                 merges = new_merges
                 self.best_merges = new_merges
                 self.best_score = cand_res
+
+                # --- NEW: persist accepted tokenizer and (optionally) remap embeddings ---
+                if getattr(self, "_accept_workdir", None) is None:
+                    self._accept_workdir = Path(tempfile.mkdtemp(prefix="bpe_accept_"))
+                accepted_tok_dir = self.editor.write_edited(
+                    self.best_merges, self._accept_workdir / f"tok_round_{r}")
+
+                if getattr(self, "_remap_each_accept", False):
+                    # Decide save target
+                    if hasattr(self, "_remap_out") and self._remap_out:
+                        save_target = os.path.join(self._remap_out, f"round_{r}")
+                    else:
+                        save_target = ""  # temp use; no persistent bundle
+
+                    used_dir = save_and_optionally_remap(
+                        base_model_dir=self.model_name,         # HF repo id or local model dir
+                        edited_tok_dir=Path(accepted_tok_dir),
+                        remap_out=save_target,
+                        tie_lm_head=True,
+                    )
+                    # Reload tokenizer from the (remapped or edited) directory
+                    self.best_tok = AutoTokenizer.from_pretrained(used_dir, use_fast=True)
+                    print(
+                        f"    remap: embeddings {'done → ' + used_dir if save_target else 'skipped (temp)'}")
+                else:
+                    # If not remapping each round, still advance best_tok to the edited tokenizer
+                    self.best_tok = AutoTokenizer.from_pretrained(accepted_tok_dir, use_fast=True)
             else:
                 print("  -> rejected (no improvement)")
         return self.best_merges, self.best_score  # type: ignore
@@ -644,6 +700,10 @@ def main():
     ap.add_argument("--max_h", type=int, default=1000, help="Max anchors to read")
     ap.add_argument("--max_n", type=int, default=2000, help="Max neutrals to read")
     ap.add_argument("--out", required=True, help="Output dir for edited tokenizer (HF format)")
+    ap.add_argument("--remap_each_accept", action="store_true",
+                    help="If set, remap model embeddings after each accepted edit and use that tokenizer in subsequent rounds.")
+    ap.add_argument("--remap_out", type=str, default="",
+                    help="Directory to save remapped model+tokenizer when an edit is accepted. If empty, a temp dir is used.")
     args = ap.parse_args()
 
     set_seeds(args.seed)
@@ -681,12 +741,27 @@ def main():
                        score=scorer, candidate_gen=generator, rounds=args.rounds, seed=args.seed)
     search.initialize_baseline()
     best_merges, best_score = search.search()
+    # Enable optional per-accept remapping
+    search._remap_each_accept = args.remap_each_accept
+    search._remap_out = args.remap_out  # can be "", meaning temp-only
 
     out_dir = Path(args.out)
     editor = search.editor
     editor.write_edited(best_merges, out_dir)
     print(f"[done] wrote searched tokenizer to: {out_dir}")
     print(f"[best] J={best_score.J:.4f} | ppl={best_score.ppl:.3f} | drift={best_score.drift:.5f} | tpc={best_score.tpc:.5f}")
+
+    if args.remap_out:
+        # Produce a final remapped model+tokenizer bundle aligned to the best merges
+        final_tmp = Path(tempfile.mkdtemp(prefix="bpe_final_"))
+        editor.write_edited(best_merges, final_tmp / "tok_final")
+        remap_embeddings(
+            base_model_dir=model_name,                     # same LM used for scoring
+            new_tokenizer_dir=str(final_tmp / "tok_final"),
+            save_dir=args.remap_out,
+            tie_lm_head=True
+        )
+        print(f"[done] wrote remapped model+tokenizer to: {args.remap_out}")
 
 
 if __name__ == "__main__":
