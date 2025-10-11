@@ -1,4 +1,4 @@
-model_name: "EleutherAI/pythia-410m"
+model_name: "EleutherAI/pythia-1.4b"
 precision: "bf16"
 lora:
   r: 16
@@ -7,16 +7,16 @@ lora:
   target_modules: ["Wqkv", "out_proj", "fc_in", "fc_out"]
 train:
   lr: 2.0e-4
-  batch_size: 64
-  steps: 2000
-  warmup_steps: 100
+  batch_size: 32
+  steps: 2500
+  warmup_steps: 150
 drift:
   lambda: 0.5
   margin: 0.2
-  layer: 10
+  layer: 18
 data:
   unlabeled_stream: "data/unlabeled/u_train.jsonl"
-  anchors: "data/anchors.jsonl"
-  neutrals: "data/neutral_lookalikes.jsonl"
+  anchors: "data/anchors/anchors_500.jsonl"
+  neutrals: "data/neutrals/neutrals_1000.jsonl"
 eval:
-  u_dev_sample: 20000
+  u_dev_sample: 30000
