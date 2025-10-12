@@ -8,3 +8,10 @@ dependencies = []
 profile = "black"
 [tool.black]
 line-length = 100
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
