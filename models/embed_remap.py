@@ -28,7 +28,7 @@ from models.embed_remap import EmbeddingRemapper
 
 old_tok = AutoTokenizer.from_pretrained("EleutherAI/pythia-410m", use_fast=True)
 new_tok = AutoTokenizer.from_pretrained("tokenizers/bpe_searched", use_fast=True)
-model = AutoModelForCausalLM.from_pretrained("EleutherAI/pythia-410m", torch_dtype=torch.bfloat16).to("cuda")
+model = AutoModelForCausalLM.from_pretrained("EleutherAI/pythia-410m", dtype=torch.bfloat16).to("cuda")
 
 remapper = EmbeddingRemapper()
 model = remapper.remap(model, old_tok, new_tok, average_pool=True, update_lm_head=True)
