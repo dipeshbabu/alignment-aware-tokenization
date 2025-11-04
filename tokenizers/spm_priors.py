@@ -48,6 +48,7 @@ import os
 import re
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Sequence, Tuple
+from tools.tokenizer_export import spm_to_hf
 
 import sentencepiece as spm
 
@@ -729,32 +730,50 @@ def main():
     # Optional: export to a HF fast tokenizer folder with declared special tokens
     if args.export_hf_dir:
         os.makedirs(args.export_hf_dir, exist_ok=True)
-        # Write a minimal tokenizer.json via SentencePieceProcessor conversion
-        # We’ll rely on HF AutoTokenizer to read the .model directly and then save.
-        from transformers import AutoTokenizer
 
-        # HF can load SPM .model via PreTrainedTokenizerFast when wrapped in a folder.
-        # Create a stub folder with tokenizer.model and a config.json for special tokens.
-        spm_model_dst = os.path.join(args.export_hf_dir, "tokenizer.model")
-        # copy the .model
-        import shutil
-        shutil.copyfile(model_path, spm_model_dst)
+        # Map hf_target to a sensible base model (used only to copy special tokens)
+        target_to_base = {
+            "llama3":   "meta-llama/Meta-Llama-3-8B",
+            "mistral7b": "mistralai/Mistral-7B-v0.1",
+            "qwen2_7b": "Qwen/Qwen2-7B"
+        }
+        base_model = target_to_base.get(args.hf_target, None)
 
-        # Build a minimal config with special tokens (HF reads this on save_pretrained)
-        tok = AutoTokenizer.from_pretrained(
-            args.export_hf_dir, use_fast=True, trust_remote_code=True)
+        # Let users override via explicit flag (add this flag in build_cli below)
+        if getattr(args, "hf_base_model", None):
+            base_model = args.hf_base_model
 
+        # Use the dedicated exporter (writes tokenizer.json + tokenizer_config.json)
+        try:
+            out_dir = spm_to_hf(model_path, args.export_hf_dir, base_model=base_model)
+        except Exception as e:
+            raise RuntimeError(
+                f"[export] tokenizer_export failed: {type(e).__name__}: {e}"
+            )
+
+        # Optionally add/override special tokens and resave
+        from transformers import PreTrainedTokenizerFast
+        tok = PreTrainedTokenizerFast.from_pretrained(out_dir)
+
+        special_kwargs = {}
         if args.bos_token:
-            tok.add_special_tokens({"bos_token": args.bos_token})
+            special_kwargs["bos_token"] = args.bos_token
         if args.eos_token:
-            tok.add_special_tokens({"eos_token": args.eos_token})
+            special_kwargs["eos_token"] = args.eos_token
         if args.pad_token:
-            tok.add_special_tokens({"pad_token": args.pad_token})
-        if ud_list:
-            tok.add_special_tokens({"additional_special_tokens": ud_list})
+            special_kwargs["pad_token"] = args.pad_token
 
-        tok.save_pretrained(args.export_hf_dir)
-        print(f"[export] Wrote HF fast tokenizer to: {args.export_hf_dir}")
+        extras = []
+        if args.addl_special:
+            extras = [s for s in args.addl_special.split(",") if s.strip()]
+        if extras:
+            special_kwargs["additional_special_tokens"] = extras
+
+        if special_kwargs:
+            tok.add_special_tokens(special_kwargs)
+            tok.save_pretrained(out_dir)
+
+        print(f"[export] Wrote HF tokenizer to: {out_dir}  (base_model={base_model})")
 
 
 if __name__ == "__main__":
