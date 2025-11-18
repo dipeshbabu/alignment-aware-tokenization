@@ -1,4 +1,5 @@
 model_name: "mistralai/Mistral-7B-v0.1"
+tokenizer_name: "mistralai/Mistral-7B-v0.1"
 precision: "bf16"
 lora:
   r: 16

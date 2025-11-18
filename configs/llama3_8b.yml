@@ -1,4 +1,5 @@
 model_name: "meta-llama/Meta-Llama-3-8B"
+tokenizer_name: "meta-llama/Meta-Llama-3-8B"
 precision: "bf16"
 lora:
   r: 16
