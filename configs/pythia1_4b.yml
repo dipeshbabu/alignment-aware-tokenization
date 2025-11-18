@@ -1,4 +1,5 @@
 model_name: "EleutherAI/pythia-1.4b"
+tokenizer_name: "EleutherAI/pythia-1.4b"
 precision: "bf16"
 lora:
   r: 16
@@ -13,7 +14,7 @@ train:
 drift:
   lambda: 0.0
   margin: 0.2
-  layer: 18
+  layer: 11
 data:
   unlabeled_stream: "data/unlabeled/u_train.jsonl"
   anchors: "data/anchors/anchors_500.jsonl"
