@@ -40,3 +40,8 @@ def log_run_meta(out_dir: str, cfg: dict, extras: dict | None = None) -> None:
         meta.update(extras)
     with open(os.path.join(out_dir, "run_meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
+
+
+def tokenizer_hash(tokenizer_dir_or_id: str) -> str:
+    """Stable-ish short hash for a tokenizer reference."""
+    return hashlib.md5(tokenizer_dir_or_id.encode()).hexdigest()[:8]
