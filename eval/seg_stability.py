@@ -4,54 +4,15 @@
 """
 Segmentation Stability Evaluation (1-edit protocol)
 
-What this measures
-------------------
-Given a tokenizer and a set of texts, we:
-1) Compute token-boundary sets for each original text.
-2) Generate 1-edit perturbations (insert / delete / swap) with fixed rules.
-3) Re-tokenize perturbed texts and compare boundary sets to the original:
-   - Jaccard(B0, Bi) = |B0 ∩ Bi| / |B0 ∪ Bi|
-   - Boundary flip rate = 1 - Jaccard(B0, Bi)
-   - Seg-change indicator = 1{B0 != Bi}
+IMPORTANT FIX:
+- For insert/delete edits, character indices shift.
+  We must align perturbed boundary indices back into the original string's index space,
+  otherwise Jaccard/flip is artificially inflated.
 
-We aggregate per-text across all perturbations and then across the corpus.
-Optionally, we return 95% bootstrap CIs for the means.
-
-Design (OOP + small patterns)
------------------------------
-- TokenBoundaryExtractor: extracts character-level boundary sets with offsets.
-- OneEditPerturber: generates 1-edit variants deterministically (seeded).
-- StabilityEvaluator: orchestrates evaluation & statistics.
-- Bootstrapper: reusable CI computation for means and rates.
-
-Definitions
-----------
-- "Boundary": character index where a token begins (0-indexed).
-  We ignore special tokens; offsets come from fast tokenizers' offset mappings.
-
-CLI
----
-python -m eval.seg_stability \
-  --tokenizer EleutherAI/pythia-410m \
-  --texts data/eval/benign_1500.jsonl \
-  --key text \
-  --max_texts 400 \
-  --ops insert delete swap \
-  --samples_per_op 3 \
-  --bootstrap 800 \
-  --seed 
-
-Outputs
--------
-- Prints mean Jaccard, boundary-flip rate, and seg-change rate with (optional) CIs.
-- Prints tokens-per-char (tpc) for originals (handy for your hero table).
-
-Note
-----
-If offset mappings are unavailable (rare), we fall back to a whitespace+punct
-heuristic to approximate boundaries.
+This version:
+- OneEditPerturber yields (op, perturbed, edit_pos, delta)
+- Evaluator aligns boundaries before comparison.
 """
-
 from __future__ import annotations
 
 import argparse
@@ -68,11 +29,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from utils.seeding import set_global_seed
 
 
-# ----------------------------- Utilities ------------------------------------
-
-
 def read_jsonl_texts(path: str, key: str = "text", limit: Optional[int] = None) -> List[str]:
-    """Read JSONL and return list of field `key` (non-empty)."""
     out: List[str] = []
     with open(path, "r", encoding="utf-8") as f:
         for i, line in enumerate(f):
@@ -89,7 +46,6 @@ def read_jsonl_texts(path: str, key: str = "text", limit: Optional[int] = None) 
 
 
 def bootstrap_ci(values: np.ndarray, n_boot: int = 800, alpha: float = 0.05, seed: int = 9172) -> Tuple[float, float]:
-    """Non-parametric bootstrap CI for the mean of `values`."""
     if len(values) == 0:
         return (math.nan, math.nan)
     rng = np.random.default_rng(seed)
@@ -102,24 +58,8 @@ def bootstrap_ci(values: np.ndarray, n_boot: int = 800, alpha: float = 0.05, see
     return float(lo), float(hi)
 
 
-# ---------------------- Token boundary extraction ----------------------------
-
-
 @dataclass
 class TokenBoundaryExtractor:
-    """
-    Extract token-boundary sets using fast tokenizer offset mappings.
-
-    Boundary definition: character indices where a token begins (0-indexed).
-    Special tokens are ignored. If offsets aren't available, we fallback to
-    a whitespace-and-punctuation heuristic.
-
-    Methods
-    -------
-    boundaries(text): returns a sorted tuple of boundary indices
-    tokens_per_char(text): returns len(tokens)/len(text) ignoring specials
-    """
-
     tokenizer: PreTrainedTokenizerBase
 
     def _fast_offsets(self, text: str) -> Optional[List[Tuple[int, int]]]:
@@ -130,10 +70,9 @@ class TokenBoundaryExtractor:
                 add_special_tokens=False,
                 truncation=False,
             )
-            # HF can return list-of-lists; we handle the first (single input)
             offsets = enc.get("offset_mapping")
             if isinstance(offsets, list) and len(offsets) > 0 and isinstance(offsets[0], tuple):
-                return offsets  # already a flat list of tuples
+                return offsets
             if isinstance(offsets, list) and len(offsets) > 0 and isinstance(offsets[0], list):
                 return [tuple(x) for x in offsets[0]]
         except Exception:
@@ -141,9 +80,7 @@ class TokenBoundaryExtractor:
         return None
 
     def _heuristic_boundaries(self, text: str) -> Tuple[int, ...]:
-        # Fallback: split on whitespace/punct and reconstruct starts
         bounds: List[int] = []
-        i = 0
         prev_split = True
         for idx, ch in enumerate(text):
             split_here = bool(re.match(r"\s|[^\w]", ch))
@@ -155,7 +92,6 @@ class TokenBoundaryExtractor:
     def boundaries(self, text: str) -> Tuple[int, ...]:
         offsets = self._fast_offsets(text)
         if offsets:
-            # Token starts are offsets where (start != end) (skip empty pieces)
             starts = [s for (s, e) in offsets if (e - s) > 0]
             return tuple(sorted(set(starts)))
         return self._heuristic_boundaries(text)
@@ -167,31 +103,30 @@ class TokenBoundaryExtractor:
         if offsets:
             n_tokens = sum(1 for (s, e) in offsets if (e - s) > 0)
         else:
-            # heuristic token count
             n_tokens = len([w for w in re.split(r"\s+|[^\w]", text) if w])
         return float(n_tokens) / max(len(text), 1)
 
 
-# ------------------------ 1-edit perturbation rules --------------------------
+def align_boundaries(b1: Set[int], edit_pos: int, delta: int) -> Set[int]:
+    """
+    Map boundaries from perturbed string back to original index space.
+    - insert: delta=+1 => perturbed indices after edit_pos are +1, so subtract 1
+    - delete: delta=-1 => perturbed indices after edit_pos are -1, so subtract(-1)=+1
+    - swap:   delta=0  => unchanged
+    """
+    if delta == 0:
+        return b1
+    out = set()
+    for b in b1:
+        if b < edit_pos:
+            out.add(b)
+        else:
+            out.add(b - delta)
+    return out
 
 
 @dataclass
 class OneEditPerturber:
-    """
-    Generate 1-edit variants of a string with deterministic randomness.
-
-    Operations supported:
-      - insert: insert a benign character at a random position
-      - delete: delete one character (skip if too short)
-      - swap:   swap two adjacent non-space characters
-
-    Use `samples_per_op` to generate multiple variants per op per string.
-
-    Methods
-    -------
-    variants(text): yields (op_name, perturbed_text)
-    """
-
     ops: Sequence[str] = ("insert", "delete", "swap")
     samples_per_op: int = 3
     seed: int = 9172
@@ -201,54 +136,52 @@ class OneEditPerturber:
     def __post_init__(self):
         self._rng = random.Random(self.seed)
 
-    def _insert(self, s: str) -> Optional[str]:
+    def _insert(self, s: str) -> Optional[Tuple[str, int, int]]:
         if not s:
             return None
         pos = self._rng.randrange(0, len(s) + 1)
         ch = self._rng.choice(self._INSERT_CHARS)
-        return s[:pos] + ch + s[pos:]
+        return (s[:pos] + ch + s[pos:], pos, +1)
 
-    def _delete(self, s: str) -> Optional[str]:
+    def _delete(self, s: str) -> Optional[Tuple[str, int, int]]:
         if len(s) < 2:
             return None
         pos = self._rng.randrange(0, len(s))
-        return s[:pos] + s[pos + 1:]
+        return (s[:pos] + s[pos + 1:], pos, -1)
 
-    def _swap(self, s: str) -> Optional[str]:
+    def _swap(self, s: str) -> Optional[Tuple[str, int, int]]:
         if len(s) < 2:
             return None
-        # choose pos to swap pos and pos+1; avoid spaces for cleaner edits
         trials = 0
         while trials < 10:
             pos = self._rng.randrange(0, len(s) - 1)
             if not (s[pos].isspace() or s[pos + 1].isspace()):
-                return s[:pos] + s[pos + 1] + s[pos] + s[pos + 2:]
+                t = s[:pos] + s[pos + 1] + s[pos] + s[pos + 2:]
+                return (t, pos, 0)
             trials += 1
-        # fallback: swap anyway
         pos = self._rng.randrange(0, len(s) - 1)
-        return s[:pos] + s[pos + 1] + s[pos] + s[pos + 2:]
+        t = s[:pos] + s[pos + 1] + s[pos] + s[pos + 2:]
+        return (t, pos, 0)
 
-    def variants(self, s: str) -> Iterable[Tuple[str, str]]:
+    def variants(self, s: str) -> Iterable[Tuple[str, str, int, int]]:
         for op in self.ops:
             for _ in range(self.samples_per_op):
                 if op == "insert":
-                    t = self._insert(s)
+                    r = self._insert(s)
                 elif op == "delete":
-                    t = self._delete(s)
+                    r = self._delete(s)
                 elif op == "swap":
-                    t = self._swap(s)
+                    r = self._swap(s)
                 else:
-                    t = None
-                if t is not None and t != s:
-                    yield (op, t)
-
-
-# --------------------------- Evaluator ---------------------------------------
+                    r = None
+                if r is not None:
+                    t, pos, delta = r
+                    if t != s:
+                        yield (op, t, pos, delta)
 
 
 @dataclass
 class StabilityStats:
-    """Container for per-text and aggregate statistics."""
     jaccards: List[float]
     flips: List[float]
     seg_changed: List[int]
@@ -256,24 +189,7 @@ class StabilityStats:
 
 
 class StabilityEvaluator:
-    """
-    Orchestrate stability evaluation given a tokenizer, texts, and a perturber.
-
-    Metrics (per-perturbation):
-      Jaccard = |B0 ∩ Bi| / |B0 ∪ Bi|
-      Boundary flip rate = 1 - Jaccard
-      Seg-change = 1{B0 != Bi}
-
-    Aggregation:
-      - report means across all perturbations (micro-average)
-      - optional bootstrap CIs for each mean
-    """
-
-    def __init__(
-        self,
-        tokenizer: PreTrainedTokenizerBase,
-        perturber: OneEditPerturber,
-    ):
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, perturber: OneEditPerturber):
         self.tok = tokenizer
         self.boundary_extractor = TokenBoundaryExtractor(tokenizer)
         self.perturber = perturber
@@ -303,8 +219,10 @@ class StabilityEvaluator:
             tpc0 = self.boundary_extractor.tokens_per_char(s)
             tpc_list.append(tpc0)
 
-            for _, s2 in self.perturber.variants(s):
-                b1 = set(self.boundary_extractor.boundaries(s2))
+            for _, s2, edit_pos, delta in self.perturber.variants(s):
+                b1_raw = set(self.boundary_extractor.boundaries(s2))
+                b1 = align_boundaries(b1_raw, edit_pos=edit_pos, delta=delta)
+
                 j = self._jaccard(b0, b1)
                 j_list.append(j)
                 f_list.append(1.0 - j)
@@ -321,8 +239,8 @@ class StabilityEvaluator:
                                       n_boot=bootstrap, alpha=alpha, seed=seed)
             c_lo, c_hi = bootstrap_ci(np.array(c_list, dtype=np.float32),
                                       n_boot=bootstrap, alpha=alpha, seed=seed)
-            tpc_arr = np.array(tpc_list, dtype=np.float32)
-            t_lo, t_hi = bootstrap_ci(tpc_arr, n_boot=bootstrap, alpha=alpha, seed=seed)
+            t_lo, t_hi = bootstrap_ci(np.array(tpc_list, dtype=np.float32),
+                                      n_boot=bootstrap, alpha=alpha, seed=seed)
             cis = {
                 "jaccard": (j_lo, j_hi),
                 "flip_rate": (f_lo, f_hi),
@@ -332,29 +250,22 @@ class StabilityEvaluator:
         return stats, cis
 
 
-# ------------------------------ CLI -----------------------------------------
-
-
 def main():
     ap = argparse.ArgumentParser(description="Segmentation stability (1-edit protocol).")
     ap.add_argument("--tokenizer", required=True, help="HF tokenizer path or model id")
     ap.add_argument("--texts", type=str, default="", help="Optional JSONL file with texts")
     ap.add_argument("--key", type=str, default="text", help="JSONL key to read")
-    ap.add_argument("--max_texts", type=int, default=400,
-                    help="Number of base texts to sample/evaluate")
-    ap.add_argument("--ops", nargs="+", default=["insert",
-                    "delete", "swap"], help="Subset of ops to use")
-    ap.add_argument("--samples_per_op", type=int, default=3, help="Perturbations per op per text")
-    ap.add_argument("--bootstrap", type=int, default=800,
-                    help="Bootstrap samples for 95% CI (0 to disable)")
-    ap.add_argument("--alpha", type=float, default=0.05, help="1 - confidence level")
+    ap.add_argument("--max_texts", type=int, default=400)
+    ap.add_argument("--ops", nargs="+", default=["insert", "delete", "swap"])
+    ap.add_argument("--samples_per_op", type=int, default=3)
+    ap.add_argument("--bootstrap", type=int, default=800)
+    ap.add_argument("--alpha", type=float, default=0.05)
     ap.add_argument("--seed", type=int, default=9172)
     args = ap.parse_args()
 
     set_global_seed(args.seed)
     tok = AutoTokenizer.from_pretrained(args.tokenizer, use_fast=True)
 
-    # default small sample set if no JSONL provided
     if args.texts and os.path.exists(args.texts):
         base_texts = read_jsonl_texts(args.texts, key=args.key, limit=args.max_texts)
     else:
@@ -383,13 +294,13 @@ def main():
     print(f"Texts: {len(base_texts)} | Ops: {','.join(args.ops)} | Samples/op: {args.samples_per_op}")
     print(f"Original TPC (mean):          {tpc_mean:6.4f}" + (
         f"   (95% CI {cis['tpc_orig'][0]:.4f}–{cis['tpc_orig'][1]:.4f})" if cis else ""))
-    print(f"Jaccard (mean):               {j_mean:6.4f}" +
-          (f"   (95% CI {cis['jaccard'][0]:.4f}–{cis['jaccard'][1]:.4f})" if cis else ""))
+    print(f"Jaccard (mean):               {j_mean:6.4f}" + (
+        f"   (95% CI {cis['jaccard'][0]:.4f}–{cis['jaccard'][1]:.4f})" if cis else ""))
     print(f"Boundary flip rate (mean):    {f_mean:6.4f}" + (
         f"   (95% CI {cis['flip_rate'][0]:.4f}–{cis['flip_rate'][1]:.4f})" if cis else ""))
     print(f"Segmentation changed (rate):  {c_mean:6.4f}" + (
         f"   (95% CI {cis['seg_change_rate'][0]:.4f}–{cis['seg_change_rate'][1]:.4f})" if cis else ""))
-    print("Notes: Boundary = character index where a token starts; specials ignored.")
+    print("Notes: Boundary = character index where a token starts; specials ignored; insert/delete boundaries aligned.")
     print("=======================================")
 
 

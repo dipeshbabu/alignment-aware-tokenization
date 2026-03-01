@@ -2,7 +2,7 @@
 set -euo pipefail
 BASE_TOK=${1:-"EleutherAI/pythia-410m"}
 MODEL_ID=${2:-$BASE_TOK}
-PROBE=${3:-"probes/v_layer.pt.npy"}   # or .npy if you saved that way
+PROBE=${3:-"probes/pythia410m_layer10.npy"}   # or .npy if you saved that way
 python -m tokenizers.bpe_search \
   --base_tokenizer "$BASE_TOK" \
   --model_name "$MODEL_ID" \

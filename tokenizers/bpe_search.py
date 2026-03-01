@@ -397,22 +397,6 @@ class CandidateGenerator:
 
 
 class RiskyMergePruner(CandidateGenerator):
-    """
-    Propose pruning merges that concatenate exactly into hazard stems
-    that frequently appear in neutral texts.
-
-    Heuristic:
-        For each merge "a b", compute cat = "ab". If cat is a hazard stem
-        and that stem appears >= min_benign_hits times as a substring in
-        neutral sentences, consider the merge risky and eligible for pruning.
-
-    Args:
-        stems:           Hazard stems.
-        benign_counts:   Map stem -> count of neutral sentences containing it.
-        min_benign_hits: Minimum neutral-occurrence threshold to mark risky.
-        prune_k:         Max risky merges to prune in a round.
-    """
-
     def __init__(
         self,
         stems: List[str],
@@ -420,57 +404,57 @@ class RiskyMergePruner(CandidateGenerator):
         min_benign_hits: int,
         prune_k: int,
     ):
-        self.stems = set(stems)
-        self.counts = dict(benign_counts)
+        # store canonical, lowercase stems
+        self.stems = set(s.lower() for s in stems)
+        self.counts = {k.lower(): int(v) for k, v in benign_counts.items()}
         self.min_hits = int(min_benign_hits)
         self.k = int(prune_k)
 
+    @staticmethod
+    def _canonicalize(tok: str) -> str:
+        """Map 'Ġbomb' -> 'bomb', '▁bomb' -> 'bomb', else lowercased token."""
+        if not tok:
+            return tok
+        if tok[0] in ("Ġ", "▁"):
+            tok = tok[1:]
+        return tok.lower()
+
     def risky_indices(self, merges: List[str]) -> List[int]:
-        """
-        Compute the indices in `merges` that are considered risky.
-
-        Args:
-            merges: Current merges list.
-
-        Returns:
-            List of integer indices into `merges`.
-        """
         risky: List[int] = []
         for i, m in enumerate(merges):
-            if not isinstance(m, str):
-                # handle accidental pair form
-                if (
-                    isinstance(m, (list, tuple))
-                    and len(m) == 2
-                    and all(isinstance(x, str) for x in m)
-                ):
-                    cat = "".join(m)
-                else:
-                    continue
-            else:
+            if isinstance(m, str):
                 parts = m.split()
                 if len(parts) != 2:
                     continue
                 cat = "".join(parts)
-            if (cat in self.stems) and (self.counts.get(cat, 0) >= self.min_hits):
+            elif isinstance(m, (list, tuple)) and len(m) == 2 and all(isinstance(x, str) for x in m):
+                cat = "".join(m)
+            else:
+                continue
+
+            stem = self._canonicalize(cat)
+            if stem in self.stems and self.counts.get(stem, 0) >= self.min_hits:
                 risky.append(i)
         return risky
 
     def propose(self, merges: List[str]) -> List[int]:
-        """
-        Choose up to `prune_k` risky merge indices for pruning.
-
-        Args:
-            merges: Current merges list.
-
-        Returns:
-            Sorted list of indices to remove (can be empty).
-        """
         risky = self.risky_indices(merges)
         if not risky:
             return []
-        k = min(self.k, len(risky))
-        return sorted(random.sample(risky, k))
+
+        # deterministically take the worst offenders first
+        def risk_score(idx: int) -> int:
+            m = merges[idx]
+            if isinstance(m, str):
+                parts = m.split()
+                cat = "".join(parts) if len(parts) == 2 else ""
+            else:
+                cat = "".join(m) if isinstance(m, (list, tuple)) and len(m) == 2 else ""
+            stem = self._canonicalize(cat)
+            return self.counts.get(stem, 0)
+
+        risky_sorted = sorted(risky, key=lambda idx: (-risk_score(idx), idx))
+        return sorted(risky_sorted[: min(self.k, len(risky_sorted))])
 
 
 # ----------------------------
@@ -558,6 +542,69 @@ class WarmupAdapter:
         return model
 
 
+def _token_end_boundaries(tok: PreTrainedTokenizerFast, text: str):
+    """Return token end boundaries in character offsets (excluding specials)."""
+    try:
+        enc = tok(text, return_offsets_mapping=True, add_special_tokens=False)
+        offs = enc.get("offset_mapping", None)
+        if offs is None:
+            return None
+        ends = [int(e) for (s, e) in offs if e is not None]
+        return tuple(ends)
+    except Exception:
+        return None
+
+
+def _jaccard(a, b):
+    if a is None or b is None:
+        return 1.0
+    sa, sb = set(a), set(b)
+    if not sa and not sb:
+        return 1.0
+    return len(sa & sb) / max(1, len(sa | sb))
+
+
+def seg_flip_rate(
+    tok: PreTrainedTokenizerFast,
+    texts: List[str],
+    n_texts: int = 200,
+    n_ops: int = 2,
+    seed: int = 9172,
+):
+    """Estimate segmentation instability under tiny 1-char edits.
+
+    Returns mean boundary flip rate = 1 - Jaccard(boundaries(text), boundaries(perturbed(text))).
+    """
+    import random
+    rng = random.Random(seed)
+    sample = [t for t in texts if isinstance(t, str) and t.strip()]
+    rng.shuffle(sample)
+    sample = sample[: max(1, min(n_texts, len(sample)))]
+
+    flips = []
+    for t in sample:
+        base = _token_end_boundaries(tok, t)
+        if base is None:
+            continue
+        for _ in range(n_ops):
+            s = t
+            if len(s) < 4:
+                continue
+            op = rng.choice(["del", "sub", "ins"])
+            i = rng.randrange(0, len(s))
+            if op == "del" and len(s) > 1:
+                s2 = s[:i] + s[i+1:]
+            elif op == "sub":
+                s2 = s[:i] + rng.choice("abcdefghijklmnopqrstuvwxyz") + s[i+1:]
+            else:  # ins
+                s2 = s[:i] + rng.choice("abcdefghijklmnopqrstuvwxyz") + s[i:]
+            pert = _token_end_boundaries(tok, s2)
+            flips.append(1.0 - _jaccard(base, pert))
+
+    if not flips:
+        return 0.0
+    return float(sum(flips) / len(flips))
+
 # ----------------------------
 # Scoring (Strategy)
 # ----------------------------
@@ -565,20 +612,25 @@ class WarmupAdapter:
 
 @dataclass
 class ScoreResult:
-    """
-    Container for scoring outputs.
+    """Container for scoring outputs.
 
     Attributes:
-        J:     Joint objective value.
-        ppl:   Perplexity on U_dev.
-        drift: Neutral drift score (mean concept logit).
-        tpc:   Tokens per character on U_dev.
+        J:       Joint objective value.
+        ppl:     Perplexity on U_dev.
+        muN:     Mean neutral drift (lower is better).
+        muH:     Mean hazard drift (higher is better; diagnostic).
+        gap:     muH - muN (must not collapse).
+        tpc:     Tokens per character on U_dev.
+        stab:    Segmentation instability (boundary flip rate; lower is better).
     """
 
     J: float
     ppl: float
-    drift: float
+    muN: float
+    muH: float
+    gap: float
     tpc: float
+    stab: float
 
 
 class ScoreStrategy:
@@ -594,7 +646,7 @@ class JointScore(ScoreStrategy):
     """
     Joint scoring with normalization:
 
-        J = ppl/ppl0 + alpha * (drift/drift0) + beta * (tpc/tpc0)
+        J = ppl/ppl0 + alpha*(muN/muN0) + beta*(tpc/tpc0) + gamma*(stab/stab0)
 
     Each candidate is briefly LoRA-warmed-up to reduce adaptation artifacts.
 
@@ -616,46 +668,64 @@ class JointScore(ScoreStrategy):
         self,
         model_name: str,
         u_dev_texts: List[str],
+        anchors: List[str],
         neutrals: List[str],
         v_path: str,
         alpha: float,
         beta: float,
+        gamma: float,
         ppl0: float,
-        drift0: float,
+        muN0: float,
         tpc0: float,
+        stab0: float,
+        gap0: float,
+        gap_min_ratio: float = 0.7,
+        gap_min_abs: float = 0.05,
+        stab_max_texts: int = 200,
+        stab_ops: int = 2,
         drift_layer: int = 10,
         warmup_steps: int = 150,
     ):
         self.model_name = model_name
         self.u_dev_texts = u_dev_texts
+        self.anchors = anchors
         self.neutrals = neutrals
         self.alpha = alpha
         self.beta = beta
+        self.gamma = gamma
         self.ppl0 = ppl0
-        self.drift0 = drift0
+        self.muN0 = muN0
         self.tpc0 = tpc0
+        self.stab0 = stab0
+        self.gap0 = gap0
+        self.gap_min_ratio = gap_min_ratio
+        self.gap_min_abs = gap_min_abs
+        self.stab_max_texts = stab_max_texts
+        self.stab_ops = stab_ops
         self.drift_layer = drift_layer
         self.v = self._load_v(v_path)
         self._warmup = WarmupAdapter(model_name, steps=warmup_steps)
 
-    @staticmethod
-    def _load_v(path: str) -> np.ndarray:
-        """
-        Load concept vector `v` saved as .npy (or .pt.npy).
+@staticmethod
+def _load_v(path: str) -> np.ndarray:
+    """Load and L2-normalize concept vector `v`."""
+    cand = []
+    cand.append(path)
+    if not path.endswith(".npy"):
+        cand.append(path + ".npy")
+    for p in cand:
+        if os.path.exists(p):
+            v = np.load(p, allow_pickle=True)
+            v = np.asarray(v, dtype=np.float32).reshape(-1)
+            v = v / (np.linalg.norm(v) + 1e-9)
+            return v
+    # last resort
+    v = np.load(path, allow_pickle=True)
+    v = np.asarray(v, dtype=np.float32).reshape(-1)
+    v = v / (np.linalg.norm(v) + 1e-9)
+    return v
 
-        Args:
-            path: File path without/with .npy extension.
-
-        Returns:
-            NumPy array (1, H) or (H,) normalized vector.
-        """
-        if path.endswith(".npy"):
-            return np.load(path, allow_pickle=True)
-        if os.path.exists(path + ".npy"):
-            return np.load(path + ".npy", allow_pickle=True)
-        return np.load(path, allow_pickle=True)
-
-    def score(self, tok: PreTrainedTokenizerFast) -> ScoreResult:
+def score(self, tok: PreTrainedTokenizerFast) -> ScoreResult:
         """
         Score a candidate tokenizer by:
           - quick LoRA warmup,
@@ -673,16 +743,29 @@ class JointScore(ScoreStrategy):
         ppl = eval_ppl(model, tok, self.u_dev_texts)
         tpc = tokens_per_char(tok, self.u_dev_texts)
 
-        # drift_score returns an array; reduce to a scalar (mean)
-        _drift_arr = eval_drift(
-            model, tok, self.neutrals, self.v, layer=self.drift_layer
-        )
-        drift = float(np.mean(_drift_arr)) if len(_drift_arr) else 0.0
+        # Drift diagnostics: neutrals vs anchors (mean projections)
+        _n = eval_drift(model, tok, self.neutrals, self.v, layer=self.drift_layer)
+        _h = eval_drift(model, tok, self.anchors, self.v, layer=self.drift_layer)
+        muN = float(np.mean(_n)) if len(_n) else 0.0
+        muH = float(np.mean(_h)) if len(_h) else 0.0
+        gap = float(muH - muN)
 
-        J = (ppl / self.ppl0) + self.alpha * (drift / self.drift0) + self.beta * (
-            tpc / self.tpc0
+        # Segmentation instability (boundary flip rate under 1-char edits)
+        stab = seg_flip_rate(
+            tok, self.u_dev_texts,
+            n_texts=self.stab_max_texts,
+            n_ops=self.stab_ops,
         )
-        return ScoreResult(float(J), float(ppl), float(drift), float(tpc))
+
+        # Enforce gap retention constraint to avoid degenerate collapse
+        min_gap = max(float(self.gap_min_abs), float(self.gap_min_ratio) * float(self.gap0))
+        violated = (gap < min_gap)
+
+        J = (ppl / self.ppl0) + self.alpha * (muN / self.muN0) + self.beta * (tpc / self.tpc0) + self.gamma * (stab / self.stab0)
+        if violated:
+            J = float("inf")
+
+        return ScoreResult(float(J), float(ppl), float(muN), float(muH), float(gap), float(tpc), float(stab))
 
 
 # ----------------------------
@@ -777,14 +860,18 @@ class BPESearch:
                 "removed": 0,
                 "J": res.J,
                 "ppl": res.ppl,
-                "drift": res.drift,
+                "muN": res.muN,
+                "muH": res.muH,
+                "gap": res.gap,
+                "stab": res.stab,
                 "tpc": res.tpc,
                 "accepted": True,
             }
         )
         print(
             f"[round 0] J={res.J:.4f} | ppl={res.ppl:.3f} | "
-            f"drift={res.drift:.5f} | tpc={res.tpc:.5f}"
+            f"muN={res.muN:.5f} | muH={res.muH:.5f} | gap={res.gap:.5f} | "
+            f"tpc={res.tpc:.5f} | stab={res.stab:.5f}"
         )
 
     def search(self) -> Tuple[List[str], ScoreResult]:
@@ -814,7 +901,8 @@ class BPESearch:
             print(
                 f"[round {r}] removed={len(remove_idx)} | "
                 f"J={cand_res.J:.4f} | ppl={cand_res.ppl:.3f} | "
-                f"drift={cand_res.drift:.5f} | tpc={cand_res.tpc:.5f}"
+                f"muN={cand_res.muN:.5f} | muH={cand_res.muH:.5f} | gap={cand_res.gap:.5f} | "
+                f"tpc={cand_res.tpc:.5f} | stab={cand_res.stab:.5f}"
             )
 
             accepted = False
@@ -872,7 +960,10 @@ class BPESearch:
                     "removed": len(remove_idx),
                     "J": cand_res.J,
                     "ppl": cand_res.ppl,
-                    "drift": cand_res.drift,
+                    "muN": cand_res.muN,
+                    "muH": cand_res.muH,
+                    "gap": cand_res.gap,
+                    "stab": cand_res.stab,
                     "tpc": cand_res.tpc,
                     "accepted": accepted,
                 }
@@ -986,21 +1077,58 @@ def main():
         base_tok.pad_token = base_tok.eos_token or base_tok.unk_token
     base_tok.padding_side = "right"
 
-    base_model = AutoModelForCausalLM.from_pretrained(model_name).to("cuda").eval()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    dtype = torch.bfloat16 if device.type == "cuda" and torch.cuda.is_bf16_supported() else (torch.float16 if device.type == "cuda" else torch.float32)
+
+    try:
+        base_model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            dtype=dtype,
+            attn_implementation=("sdpa" if device.type == "cuda" else "eager"),
+        ).to(device).eval()
+    except TypeError:
+        base_model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=dtype,
+        ).to(device).eval()
     ppl0 = eval_ppl(base_model, base_tok, u_dev_texts)
     tpc0 = tokens_per_char(base_tok, u_dev_texts)
 
     # load concept vector
-    if args.probe.endswith(".npy"):
-        v = np.load(args.probe, allow_pickle=True)
-    elif os.path.exists(args.probe + ".npy"):
-        v = np.load(args.probe + ".npy", allow_pickle=True)
-    else:
-        v = np.load(args.probe, allow_pickle=True)
+    def load_probe_vector(path: str) -> np.ndarray:
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Probe not found: {path}")
+
+        if path.endswith(".npy"):
+            v = np.load(path, allow_pickle=True)
+            return np.asarray(v, dtype=np.float32).reshape(-1)
+
+        if path.endswith(".pt"):
+            obj = torch.load(path, map_location="cpu")
+            if isinstance(obj, dict):
+                if "v" in obj:
+                    obj = obj["v"]
+                else:
+                    obj = next(iter(obj.values()))
+            if isinstance(obj, torch.Tensor):
+                return obj.detach().cpu().numpy().astype(np.float32).reshape(-1)
+            return np.asarray(obj, dtype=np.float32).reshape(-1)
+
+        v = np.load(path, allow_pickle=True)
+        return np.asarray(v, dtype=np.float32).reshape(-1)
+
+    v = load_probe_vector(args.probe)
+    v = v / (np.linalg.norm(v) + 1e-9)
 
     _drift0_arr = eval_drift(base_model, base_tok, neutrals, v, layer=args.drift_layer)
     drift0 = float(np.mean(_drift0_arr)) if len(_drift0_arr) else 0.0
     drift0 = drift0 if abs(drift0) > 1e-12 else 1e-12  # avoid divide-by-zero later
+    _muH0_arr = eval_drift(base_model, base_tok, anchors, v, layer=args.drift_layer)
+    muH0 = float(np.mean(_muH0_arr)) if len(_muH0_arr) else 0.0
+    gap0 = float(muH0 - drift0)
+    stab0 = seg_flip_rate(base_tok, u_dev_texts, n_texts=args.stab_max_texts, n_ops=args.stab_ops, seed=args.seed)
+    stab0 = stab0 if stab0 > 1e-12 else 1e-12
+    print(f"[baseline extras] muH0={muH0:.5f} | gap0={gap0:.5f} | stab0={stab0:.5f}")
     print(
         f"[baseline norms] ppl0={ppl0:.3f} | tpc0={tpc0:.5f} | drift0={drift0:.5f}"
     )
@@ -1008,13 +1136,21 @@ def main():
     scorer = JointScore(
         model_name,
         u_dev_texts,
+        anchors,
         neutrals,
         args.probe,
         alpha=args.alpha,
         beta=args.beta,
+        gamma=args.gamma,
         ppl0=ppl0,
-        drift0=drift0,
+        muN0=drift0,
         tpc0=tpc0,
+        stab0=stab0,
+        gap0=gap0,
+        gap_min_ratio=args.gap_min_ratio,
+        gap_min_abs=args.gap_min_abs,
+        stab_max_texts=args.stab_max_texts,
+        stab_ops=args.stab_ops,
         drift_layer=args.drift_layer,
         warmup_steps=args.warmup_steps,
     )
@@ -1048,7 +1184,7 @@ def main():
     print(f"[done] wrote searched tokenizer to: {out_dir}")
     print(
         f"[best] J={best_score.J:.4f} | ppl={best_score.ppl:.3f} | "
-        f"drift={best_score.drift:.5f} | tpc={best_score.tpc:.5f}"
+        f"muN={best_score.muN:.5f} | muH={best_score.muH:.5f} | gap={best_score.gap:.5f} | tpc={best_score.tpc:.5f} | stab={best_score.stab:.5f}"
     )
 
     # Round-by-round JSON log (for tables / plots)

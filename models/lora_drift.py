@@ -171,13 +171,52 @@ def drift_penalty(model, tok, v_vec, texts, layer, margin):
     return torch.stack(scores).mean() if scores else torch.tensor(0.0, device=model.device, dtype=model.dtype)
 
 
-def _load_probe_vector():
-    for p in ["probes/v_layer.npy", "probes/v_layer.pt.npy", "probes/v_layer.pt"]:
-        if os.path.exists(p):
-            v = np.load(p, allow_pickle=True)
-            return np.asarray(v).squeeze()
+def _load_probe_vector(probe_path: str | None) -> np.ndarray:
+    """Load concept direction vector.
+
+    Supports:
+      - .npy saved with numpy
+      - .pt saved with torch.save(tensor or dict)
+
+    If probe_path is None, tries common defaults under probes/.
+    """
+    candidates = []
+    if probe_path:
+        candidates.append(probe_path)
+    candidates += [
+        "probes/v_layer.npy",
+        "probes/v_layer.pt",
+        "probes/v.npy",
+    ]
+
+    for c in candidates:
+        if not c:
+            continue
+        if not os.path.exists(c):
+            continue
+
+        if c.endswith(".npy"):
+            v = np.load(c, allow_pickle=True)
+            return np.asarray(v, dtype=np.float32).squeeze()
+
+        if c.endswith(".pt"):
+            obj = torch.load(c, map_location="cpu")
+            if isinstance(obj, dict):
+                obj = obj.get("v", next(iter(obj.values())))
+            if isinstance(obj, torch.Tensor):
+                return obj.detach().cpu().numpy().astype(np.float32).squeeze()
+            return np.asarray(obj, dtype=np.float32).squeeze()
+
+        # last resort
+        try:
+            v = np.load(c, allow_pickle=True)
+            return np.asarray(v, dtype=np.float32).squeeze()
+        except Exception:
+            continue
+
     raise FileNotFoundError(
-        "Probe vector not found in probes/ (looked for v_layer.npy / .pt.npy / .pt)")
+        f"Could not find probe vector. Tried: {candidates}"
+    )
 
 # ---------------------------
 # Main
@@ -261,6 +300,7 @@ def main(args):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
+    ap.add_argument("--probe", default=None, help="Path to probe vector (.npy or .pt). Overrides YAML drift.probe_path.")
     p.add_argument("--config", required=True)
     p.add_argument("--save", required=True)
     main(p.parse_args())

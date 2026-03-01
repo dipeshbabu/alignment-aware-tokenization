@@ -159,11 +159,9 @@ def drift_score(
         # mean-pool across tokens -> [B, H]
         h_mean = h.mean(dim=1).to(torch.float32)
 
-        # cosine similarity with v per example
-        sim = torch.nn.functional.cosine_similarity(
-            h_mean, v.unsqueeze(0).expand_as(h_mean), dim=-1
-        )
-        scores.extend(sim.tolist())
+        # dot product with v per example (v is normalized; drift is a scalar projection)
+        sim = (h_mean * v.view(1, -1)).sum(dim=-1)
+        scores.extend(sim.detach().cpu().tolist())
 
     return np.asarray(scores, dtype=np.float32)
 

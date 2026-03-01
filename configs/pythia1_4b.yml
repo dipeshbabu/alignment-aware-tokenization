@@ -8,7 +8,7 @@ lora:
   target_modules: ["query_key_value", "dense", "dense_h_to_4h", "dense_4h_to_h"]
 train:
   lr: 2.0e-4
-  batch_size: 32
+  batch_size: 16
   steps: 2500
   warmup_steps: 150
 drift:
