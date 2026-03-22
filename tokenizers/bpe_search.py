@@ -706,66 +706,66 @@ class JointScore(ScoreStrategy):
         self.v = self._load_v(v_path)
         self._warmup = WarmupAdapter(model_name, steps=warmup_steps)
 
-@staticmethod
-def _load_v(path: str) -> np.ndarray:
-    """Load and L2-normalize concept vector `v`."""
-    cand = []
-    cand.append(path)
-    if not path.endswith(".npy"):
-        cand.append(path + ".npy")
-    for p in cand:
-        if os.path.exists(p):
-            v = np.load(p, allow_pickle=True)
-            v = np.asarray(v, dtype=np.float32).reshape(-1)
-            v = v / (np.linalg.norm(v) + 1e-9)
-            return v
-    # last resort
-    v = np.load(path, allow_pickle=True)
-    v = np.asarray(v, dtype=np.float32).reshape(-1)
-    v = v / (np.linalg.norm(v) + 1e-9)
-    return v
+    @staticmethod
+    def _load_v(path: str) -> np.ndarray:
+        """Load and L2-normalize concept vector `v`."""
+        cand = []
+        cand.append(path)
+        if not path.endswith(".npy"):
+            cand.append(path + ".npy")
+        for p in cand:
+            if os.path.exists(p):
+                v = np.load(p, allow_pickle=True)
+                v = np.asarray(v, dtype=np.float32).reshape(-1)
+                v = v / (np.linalg.norm(v) + 1e-9)
+                return v
+        # last resort
+        v = np.load(path, allow_pickle=True)
+        v = np.asarray(v, dtype=np.float32).reshape(-1)
+        v = v / (np.linalg.norm(v) + 1e-9)
+        return v
 
-def score(self, tok: PreTrainedTokenizerFast) -> ScoreResult:
-        """
-        Score a candidate tokenizer by:
-          - quick LoRA warmup,
-          - computing ppl, tpc, and drift,
-          - returning the normalized joint objective J.
+    def score(self, tok: PreTrainedTokenizerFast) -> ScoreResult:
+            """
+            Score a candidate tokenizer by:
+            - quick LoRA warmup,
+            - computing ppl, tpc, and drift,
+            - returning the normalized joint objective J.
 
-        Args:
-            tok: Candidate tokenizer to evaluate.
+            Args:
+                tok: Candidate tokenizer to evaluate.
 
-        Returns:
-            ScoreResult(J, ppl, drift, tpc).
-        """
-        model = self._warmup.run(tok, self.u_dev_texts[: self._warmup.steps])
+            Returns:
+                ScoreResult(J, ppl, drift, tpc).
+            """
+            model = self._warmup.run(tok, self.u_dev_texts[: self._warmup.steps])
 
-        ppl = eval_ppl(model, tok, self.u_dev_texts)
-        tpc = tokens_per_char(tok, self.u_dev_texts)
+            ppl = eval_ppl(model, tok, self.u_dev_texts)
+            tpc = tokens_per_char(tok, self.u_dev_texts)
 
-        # Drift diagnostics: neutrals vs anchors (mean projections)
-        _n = eval_drift(model, tok, self.neutrals, self.v, layer=self.drift_layer)
-        _h = eval_drift(model, tok, self.anchors, self.v, layer=self.drift_layer)
-        muN = float(np.mean(_n)) if len(_n) else 0.0
-        muH = float(np.mean(_h)) if len(_h) else 0.0
-        gap = float(muH - muN)
+            # Drift diagnostics: neutrals vs anchors (mean projections)
+            _n = eval_drift(model, tok, self.neutrals, self.v, layer=self.drift_layer)
+            _h = eval_drift(model, tok, self.anchors, self.v, layer=self.drift_layer)
+            muN = float(np.mean(_n)) if len(_n) else 0.0
+            muH = float(np.mean(_h)) if len(_h) else 0.0
+            gap = float(muH - muN)
 
-        # Segmentation instability (boundary flip rate under 1-char edits)
-        stab = seg_flip_rate(
-            tok, self.u_dev_texts,
-            n_texts=self.stab_max_texts,
-            n_ops=self.stab_ops,
-        )
+            # Segmentation instability (boundary flip rate under 1-char edits)
+            stab = seg_flip_rate(
+                tok, self.u_dev_texts,
+                n_texts=self.stab_max_texts,
+                n_ops=self.stab_ops,
+            )
 
-        # Enforce gap retention constraint to avoid degenerate collapse
-        min_gap = max(float(self.gap_min_abs), float(self.gap_min_ratio) * float(self.gap0))
-        violated = (gap < min_gap)
+            # Enforce gap retention constraint to avoid degenerate collapse
+            min_gap = max(float(self.gap_min_abs), float(self.gap_min_ratio) * float(self.gap0))
+            violated = (gap < min_gap)
 
-        J = (ppl / self.ppl0) + self.alpha * (muN / self.muN0) + self.beta * (tpc / self.tpc0) + self.gamma * (stab / self.stab0)
-        if violated:
-            J = float("inf")
+            J = (ppl / self.ppl0) + self.alpha * (muN / self.muN0) + self.beta * (tpc / self.tpc0) + self.gamma * (stab / self.stab0)
+            if violated:
+                J = float("inf")
 
-        return ScoreResult(float(J), float(ppl), float(muN), float(muH), float(gap), float(tpc), float(stab))
+            return ScoreResult(float(J), float(ppl), float(muN), float(muH), float(gap), float(tpc), float(stab))
 
 
 # ----------------------------
@@ -1021,11 +1021,36 @@ def main():
         default=5,
         help="Min neutral occurrences to mark a stem risky",
     )
+    ap.add_argument("--alpha", type=float, default=0.7, help="Weight for drift term in J")
+    ap.add_argument("--beta", type=float, default=0.1, help="Weight for tpc term in J")
+    ap.add_argument("--gamma", type=float, default=0.1, help="Weight for segmentation instability term in J")
+
+    # Segmentation stability estimation knobs
     ap.add_argument(
-        "--alpha", type=float, default=0.7, help="Weight for drift term in J"
+        "--stab_max_texts",
+        type=int,
+        default=200,
+        help="Max texts used to estimate segmentation instability (stab).",
     )
     ap.add_argument(
-        "--beta", type=float, default=0.1, help="Weight for tpc term in J"
+        "--stab_ops",
+        type=int,
+        default=2,
+        help="Number of 1-char perturbations per text for stab estimate.",
+    )
+
+    # Gap retention constraint (avoid collapse where hazards look like neutrals)
+    ap.add_argument(
+        "--gap_min_ratio",
+        type=float,
+        default=0.7,
+        help="Require (muH - muN) >= gap_min_ratio * gap0, else reject candidate.",
+    )
+    ap.add_argument(
+        "--gap_min_abs",
+        type=float,
+        default=0.05,
+        help="Require (muH - muN) >= gap_min_abs (absolute floor), else reject candidate.",
     )
     ap.add_argument(
         "--drift_layer", type=int, default=10, help="Layer index for drift projection"

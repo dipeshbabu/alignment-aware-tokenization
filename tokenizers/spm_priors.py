@@ -126,10 +126,14 @@ def apply_hf_preset(args) -> None:
     if not args.normalization_rule_name or args.normalization_rule_name == "nmt":
         args.normalization_rule_name = "nmt"
     # Strong byte fallback is pragmatic for robustness
-    if not args.byte_fallback:
+    if str(args.byte_fallback).lower() not in ["true", "false"]:
         args.byte_fallback = "true"
+    # If user explicitly set false, keep it. Otherwise default to true for presets.
+    if args.byte_fallback == "":
+        args.byte_fallback = "true"
+
     # High coverage to keep rare chars
-    if not args.character_coverage:
+    if args.character_coverage is None:
         args.character_coverage = 0.9995
 
     # Special tokens presets are conservative—override via explicit flags if needed.
@@ -137,6 +141,9 @@ def apply_hf_preset(args) -> None:
         "llama3":    {"bos": "<s>", "eos": "</s>", "pad": "", "extra": []},
         "mistral7b": {"bos": "<s>", "eos": "</s>", "pad": "", "extra": []},
         "qwen2_7b":  {"bos": "<s>", "eos": "</s>", "pad": "", "extra": []},
+        # For Gemma, we do not hardcode special tokens here.
+        # We inherit them from the base Hugging Face tokenizer in the export step.
+        "gemma2b":   {"bos": "", "eos": "", "pad": "", "extra": []},
     }
     sp = presets.get(args.hf_target, {"bos": "", "eos": "", "pad": "", "extra": []})
 
@@ -683,9 +690,19 @@ def build_cli() -> argparse.ArgumentParser:
     p.add_argument("--drop_risky_substrings", action="store_true",
                    help="Pre-filter short substrings of hazard stems.")
     p.add_argument("--min_substring_len", type=int, default=2)
-    p.add_argument("--hf_target", type=str, default="none",
-                   choices=["none", "llama3", "mistral7b", "qwen2_7b"],
-                   help="Preset SPM settings + common special tokens for target family.")
+    p.add_argument(
+        "--hf_target",
+        type=str,
+        default="none",
+        choices=["none", "llama3", "mistral7b", "qwen2_7b", "gemma2b", "gemma-2b"],
+        help="Preset settings for target family. gemma2b and gemma-2b are treated the same."
+    )
+    p.add_argument(
+        "--hf_base_model",
+        type=str,
+        default="",
+        help="Optional Hugging Face model id whose tokenizer special tokens are inherited during export."
+    )
     # explicit special tokens (override presets if provided)
     p.add_argument("--bos_token", type=str, default="")
     p.add_argument("--eos_token", type=str, default="")
@@ -703,13 +720,23 @@ def build_cli() -> argparse.ArgumentParser:
 
 def main():
     args = build_cli().parse_args()
+
+    # Normalize gemma naming
+    if args.hf_target == "gemma-2b":
+        args.hf_target = "gemma2b"
+
     apply_hf_preset(args)
 
     # Build user_defined_symbols list from preset + explicit extras
     ud_list = []
+
+    if args.user_defined_symbols:
+        ud_list.extend([s.strip() for s in args.user_defined_symbols.split(",") if s.strip()])
+
     if args.addl_special:
-        ud_list.extend([s for s in args.addl_special.split(",") if s])
-    uds = [s for s in ud_list] if ud_list else None
+        ud_list.extend([s.strip() for s in args.addl_special.split(",") if s.strip()])
+
+    uds = unique(ud_list) if ud_list else None
 
     cfg = SPMConfig(
         model_prefix=args.model_prefix,
@@ -785,13 +812,18 @@ def main():
         target_to_base = {
             "llama3":   "meta-llama/Meta-Llama-3-8B",
             "mistral7b": "mistralai/Mistral-7B-v0.1",
-            "qwen2_7b": "Qwen/Qwen2-7B"
+            "qwen2_7b": "Qwen/Qwen2-7B",
+            "gemma2b": "google/gemma-2b",
         }
         base_model = target_to_base.get(args.hf_target, None)
-
-        # Let users override via explicit flag (add this flag in build_cli below if needed)
-        if getattr(args, "hf_base_model", None):
+        if args.hf_base_model:
             base_model = args.hf_base_model
+
+        if base_model is None:
+            raise ValueError(
+                f"[export] export_hf_dir requires a known base_model for hf_target={args.hf_target}. "
+                f"Provide --hf_base_model explicitly."
+            )
 
         # Use the dedicated exporter (writes tokenizer.json + tokenizer_config.json)
         try:

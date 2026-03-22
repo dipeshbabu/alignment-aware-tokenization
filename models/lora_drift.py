@@ -259,7 +259,8 @@ def main(args):
     )
 
     neutrals = _safe_load_jsonl_texts(cfg["data"]["neutrals"])
-    v = _load_probe_vector()
+    probe_path = args.probe or cfg.get("drift", {}).get("probe_path")
+    v = _load_probe_vector(probe_path)
     # v = v / (np.linalg.norm(v) + 1e-9)
     stream = stream_text_local(
         cfg["data"]["unlabeled_stream"],
@@ -300,7 +301,7 @@ def main(args):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    ap.add_argument("--probe", default=None, help="Path to probe vector (.npy or .pt). Overrides YAML drift.probe_path.")
+    p.add_argument("--probe", default=None, help="Path to probe vector (.npy or .pt). Overrides YAML drift.probe_path.")
     p.add_argument("--config", required=True)
     p.add_argument("--save", required=True)
     main(p.parse_args())
