@@ -29,7 +29,7 @@
 #     • Prevents accidental leakage from later processing or text anomalies.
 #
 # 5.  SELF-CHECK AUDIT STAGE:
-#     • `_self_check()` re-greps the written .txt files using the same bans,
+#     `_self_check()` audits the written JSONL files using the same bans,
 #       printing flagged lines for human review (fail-closed principle).
 #
 # 6.  STRUCTURAL / READABILITY IMPROVEMENTS:
@@ -61,7 +61,7 @@
 from datasets import load_dataset
 import re, json, random, argparse, unicodedata
 from pathlib import Path
-from typing import Tuple, List
+from typing import List
 
 SEED = 9172
 MIN_LEN = 8
@@ -351,24 +351,16 @@ def _write_jsonl(rows, out_path: Path, source: str) -> int:
             f.write(json.dumps({"text": t, "label": "benign", "source": source}, ensure_ascii=False) + "\n")
     return len(rows)
 
-def _write_txt(rows, txt_path: Path) -> int:
-    _ensure_parent(txt_path)
-    with txt_path.open("w", encoding="utf-8") as f:
-        for t in rows:
-            f.write(t + "\n")
-    return len(rows)
-
-def _jsonl_and_txt_paths(jsonl_arg: str, default_path: Path) -> Tuple[Path, Path]:
+def _jsonl_path(jsonl_arg: str, default_path: Path) -> Path:
     jsonl_path = Path(jsonl_arg) if jsonl_arg else default_path
     if not jsonl_path.is_absolute():
         if jsonl_arg is None:
             jsonl_path = default_path
         else:
             jsonl_path = Path.cwd() / jsonl_path
-    txt_path = jsonl_path.with_suffix(".txt")
-    return jsonl_path, txt_path
+    return jsonl_path
 
-def dump_dolly(n: int, out_jsonl: Path, out_txt: Path, seed: int = SEED) -> None:
+def dump_dolly(n: int, out_jsonl: Path, seed: int = SEED) -> None:
     ds = load_dataset("databricks/databricks-dolly-15k", split="train")
     rows = []
     for ex in ds:
@@ -379,10 +371,9 @@ def dump_dolly(n: int, out_jsonl: Path, out_txt: Path, seed: int = SEED) -> None
     rows = rows[: max(0, int(n))]
     rows = _final_scrub(rows)
     written = _write_jsonl(rows, out_jsonl, source="dolly-15k")
-    _ = _write_txt(rows, out_txt)
     print(f"[done] dolly → {out_jsonl} ({written} lines)")
 
-def dump_rtp(n: int, out_jsonl: Path, out_txt: Path, tox_thresh: float = 0.2, seed: int = SEED) -> None:
+def dump_rtp(n: int, out_jsonl: Path, tox_thresh: float = 0.2, seed: int = SEED) -> None:
     ds = load_dataset("allenai/real-toxicity-prompts", split="train")
     rows = []
     for ex in ds:
@@ -403,18 +394,34 @@ def dump_rtp(n: int, out_jsonl: Path, out_txt: Path, tox_thresh: float = 0.2, se
     # --- KEEP only if text passes benign filters ---
         if _is_ultra_benign(t, tox_value=tox, tox_thresh=tox_thresh):
             rows.append(t)
-            
+
     random.seed(seed); random.shuffle(rows)
     rows = rows[: max(0, int(n))]
     rows = _final_scrub(rows)
     written = _write_jsonl(rows, out_jsonl, source="real-toxicity-prompts")
-    _ = _write_txt(rows, out_txt)
     print(f"[done] rtp → {out_jsonl} ({written} lines)")
 
-def _self_check(txt_path: Path) -> None:
-    """Post-write grep using the SAME predicate used for filtering (incl. obfuscation-aware)."""
+def _read_jsonl_texts(jsonl_path: Path) -> List[str]:
+    texts = []
+    with jsonl_path.open("r", encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                texts.append(line)
+                continue
+            text = record.get("text", "")
+            if isinstance(text, str):
+                texts.append(text)
+    return texts
+
+def _self_check(jsonl_path: Path) -> None:
+    """Post-write JSONL audit using the SAME predicate used for filtering."""
     bad = []
-    content = txt_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    content = _read_jsonl_texts(jsonl_path)
     for i, line in enumerate(content, 1):
         ln = _norm(line)
         if is_banned(ln):
@@ -438,11 +445,11 @@ def _self_check(txt_path: Path) -> None:
     # --- END extra visibility ---
 
     if bad:
-        print(f"[WARN] {len(bad)} hazardous-looking lines remained in {txt_path}:")
+        print(f"[WARN] {len(bad)} hazardous-looking lines remained in {jsonl_path}:")
         for i, ln in bad[:50]:
             print(f"  L{i}: {ln}")
     else:
-        print(f"[ok] self-check passed: no hazardous stems in {txt_path}")
+        print(f"[ok] self-check passed: no hazardous stems in {jsonl_path}")
 
 def main():
     ap = argparse.ArgumentParser(description="Curate ULTRA-BENIGN prompts from Dolly and RTP datasets.")
@@ -455,16 +462,15 @@ def main():
     ap.add_argument("--tox-thresh", type=float, default=0.2)
     args = ap.parse_args()
 
-    dolly_jsonl, dolly_txt = _jsonl_and_txt_paths(args.out_dolly, DEFAULT_DOLLY_OUT)
-    rtp_jsonl,   rtp_txt   = _jsonl_and_txt_paths(args.out_rtp,   DEFAULT_RTP_OUT)
+    dolly_jsonl = _jsonl_path(args.out_dolly, DEFAULT_DOLLY_OUT)
+    rtp_jsonl   = _jsonl_path(args.out_rtp,   DEFAULT_RTP_OUT)
 
     if args.run in ("both","dolly") and args.n_dolly > 0:
-        dump_dolly(args.n_dolly, dolly_jsonl, dolly_txt, args.seed)
-        _self_check(dolly_txt)
+        dump_dolly(args.n_dolly, dolly_jsonl, args.seed)
+        _self_check(dolly_jsonl)
     if args.run in ("both","rtp") and args.n_rtp > 0:
-        dump_rtp(args.n_rtp, rtp_jsonl, rtp_txt, args.tox_thresh, args.seed)
-        _self_check(rtp_txt)
+        dump_rtp(args.n_rtp, rtp_jsonl, args.tox_thresh, args.seed)
+        _self_check(rtp_jsonl)
 
 if __name__ == "__main__":
     main()
-    

@@ -261,6 +261,7 @@ def main():
     ap.add_argument("--bootstrap", type=int, default=800)
     ap.add_argument("--alpha", type=float, default=0.05)
     ap.add_argument("--seed", type=int, default=9172)
+    ap.add_argument("--out", default="", help="Optional JSON summary path")
     args = ap.parse_args()
 
     set_global_seed(args.seed)
@@ -302,6 +303,29 @@ def main():
         f"   (95% CI {cis['seg_change_rate'][0]:.4f}–{cis['seg_change_rate'][1]:.4f})" if cis else ""))
     print("Notes: Boundary = character index where a token starts; specials ignored; insert/delete boundaries aligned.")
     print("=======================================")
+
+    if args.out:
+        os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
+        with open(args.out, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "tokenizer": args.tokenizer,
+                    "texts": args.texts,
+                    "num_texts": len(base_texts),
+                    "ops": args.ops,
+                    "samples_per_op": args.samples_per_op,
+                    "seed": args.seed,
+                    "metrics": {
+                        "tpc": tpc_mean,
+                        "jaccard": j_mean,
+                        "flip_rate": f_mean,
+                        "seg_change_rate": c_mean,
+                    },
+                    "ci95": cis,
+                },
+                f,
+                indent=2,
+            )
 
 
 if __name__ == "__main__":

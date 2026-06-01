@@ -8,6 +8,7 @@ from peft import PeftModel, PeftConfig
 from transformers import AutoTokenizer, AutoModel
 from sklearn.linear_model import LogisticRegression
 from utils.seeding import set_global_seed, log_run_meta
+from utils.data_io import read_hazard_anchor_texts, read_jsonl_texts
 
 
 def pick_dtype(precision: str, device: torch.device):
@@ -57,19 +58,6 @@ def pooled_hidden_batch(model, tok, texts, layer, batch_size, max_length, pool="
                 raise  # even single-item fails → let caller handle (CPU fallback)
             batch_size = max(1, bs // 2)
     return np.concatenate(outs, axis=0) if outs else np.zeros((0, model.config.hidden_size), dtype=np.float32)
-
-
-def load_texts(path):
-    texts = []
-    with open(path, "r", encoding="utf-8") as f:
-        for ln in f:
-            if not ln.strip():
-                continue
-            j = json.loads(ln)
-            t = j.get("text", "")
-            if isinstance(t, str) and t.strip():
-                texts.append(t.strip())
-    return texts
 
 
 def main(args):
@@ -130,8 +118,14 @@ def main(args):
         model = PeftModel.from_pretrained(base_model, model_id)
         model = model.to(device).eval()
 
-    H = load_texts(cfg["data"]["anchors"])
-    N = load_texts(cfg["data"]["neutrals"])
+    H = read_hazard_anchor_texts(cfg["data"]["anchors"])
+    N = read_jsonl_texts(cfg["data"]["neutrals"], label="neutral")
+    if not N:
+        N = read_jsonl_texts(cfg["data"]["neutrals"])
+    if not H:
+        raise ValueError(f"No hazard anchor texts found in {cfg['data']['anchors']}")
+    if not N:
+        raise ValueError(f"No neutral texts found in {cfg['data']['neutrals']}")
 
     # determine valid layer index
     tmp = tok("hi", return_tensors="pt").to(device)

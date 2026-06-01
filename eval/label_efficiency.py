@@ -2,12 +2,13 @@
 # -*- coding: utf-8 -*-
 """
 Label-efficiency: train a tiny classifier on frozen mid-layer features for H vs N
-with budgets {50,100,300}; report F1 and AUPRC as mean±std across repeated trials.
+with budgets {50,100,300}; report F1 and AUPRC as mean +/- std across trials.
 """
 from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 from typing import List, Tuple
 
 import numpy as np
@@ -137,6 +138,7 @@ def main():
     ap.add_argument("--batch_size", type=int, default=16)
     ap.add_argument("--dedup", action="store_true")
     ap.add_argument("--check_overlap", action="store_true")
+    ap.add_argument("--out_json", default="", help="Optional JSON file with per-budget metrics")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(open(args.config))
@@ -192,6 +194,24 @@ def main():
 
     rng = np.random.default_rng(args.seed)
 
+    results = {
+        "model_name": model_name,
+        "layer": layer,
+        "seed": args.seed,
+        "trials": args.trials,
+        "test_size": args.test_size,
+        "dedup": bool(args.dedup),
+        "counts": {
+            "hazard": len(H),
+            "neutral": len(N),
+            "train": int(len(Xtr)),
+            "test": int(len(Xte)),
+            "pos_train": float(ytr.mean()),
+            "pos_test": float(yte.mean()),
+        },
+        "budgets": [],
+    }
+
     for k in args.budgets:
         f1s, auprcs = [], []
         for _ in range(args.trials):
@@ -204,10 +224,26 @@ def main():
 
         print(
             f"labels={min(k, len(Xtr)):<4d} "
-            f"F1={f1_mean:.4f}±{f1_std:.4f}  "
-            f"AUPRC={ap_mean:.4f}±{ap_std:.4f}  "
+            f"F1={f1_mean:.4f}+/-{f1_std:.4f}  "
+            f"AUPRC={ap_mean:.4f}+/-{ap_std:.4f}  "
             f"(trials={args.trials})"
         )
+        results["budgets"].append({
+            "requested_labels": int(k),
+            "effective_labels": int(min(k, len(Xtr))),
+            "f1_mean": f1_mean,
+            "f1_std": f1_std,
+            "auprc_mean": ap_mean,
+            "auprc_std": ap_std,
+            "f1_trials": [float(x) for x in f1s],
+            "auprc_trials": [float(x) for x in auprcs],
+        })
+
+    if args.out_json:
+        out_path = Path(args.out_json)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(results, indent=2) + "\n", encoding="utf-8")
+        print(f"[out] wrote {out_path}")
 
 
 if __name__ == "__main__":

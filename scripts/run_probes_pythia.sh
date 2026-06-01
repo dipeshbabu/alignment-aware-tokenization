@@ -13,7 +13,4 @@ python -m models.probe \
   --save probes/pythia1_4b_layer11.npy \
   --batch 4 --max_len 256
 
-python -m models.probe \
-  --config configs/gemma2b.yml \
-  --save probes/gemma2b_layer10.npy \
-  --batch 2 --max_len 256
+echo "Wrote Pythia probe vectors to probes/."

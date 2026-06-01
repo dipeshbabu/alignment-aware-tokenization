@@ -51,6 +51,8 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Sequence, Tuple
 
 import sentencepiece as spm
+from utils.data_io import read_hazard_anchor_texts as read_hazard_anchor_texts_labeled
+from utils.data_io import read_jsonl_texts as read_jsonl_texts_labeled
 
 
 # ---------------------------------------------------------------------
@@ -753,8 +755,14 @@ def main():
     )
 
     # Build lexicon (anchors + neutrals)
-    anchors = read_jsonl_texts(args.anchors, key="text")
-    neutrals = read_jsonl_texts(args.neutrals, key="text")
+    anchors = read_hazard_anchor_texts_labeled(args.anchors)
+    neutrals = read_jsonl_texts_labeled(args.neutrals, label="neutral")
+    if not neutrals:
+        neutrals = read_jsonl_texts_labeled(args.neutrals)
+    if not anchors:
+        raise ValueError(f"No hazard anchor texts found in {args.anchors}")
+    if not neutrals:
+        raise ValueError(f"No neutral texts found in {args.neutrals}")
     lex = extract_hazard_lexicon(
         anchors=anchors, neutrals=neutrals,
         min_stem_len=args.min_stem_len, max_hits_per_stem=1000

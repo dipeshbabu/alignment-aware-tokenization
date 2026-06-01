@@ -28,20 +28,7 @@ import torch
 import yaml
 from peft import PeftModel, PeftConfig
 from transformers import AutoTokenizer, AutoModel
-
-
-def _read_texts(path: str, key: str = "text") -> List[str]:
-    """Read newline-delimited JSON and return non-empty `key` fields."""
-    xs: List[str] = []
-    if not os.path.exists(path):
-        return xs
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            j = json.loads(line)
-            t = (j.get(key) or "").strip()
-            if t:
-                xs.append(t)
-    return xs
+from utils.data_io import read_hazard_anchor_texts, read_jsonl_texts
 
 
 def _load_with_dtype(model_id: str, dtype: torch.dtype):
@@ -171,6 +158,7 @@ def main():
     ap.add_argument("--config", required=True)
     ap.add_argument("--probe", required=True, help="Concept vector .npy")
     ap.add_argument("--out_dir", default="runs/latest")
+    ap.add_argument("--out_json", default="", help="Optional JSON summary path")
     ap.add_argument(
         "--batch_size",
         type=int,
@@ -190,8 +178,14 @@ def main():
     v = v / (np.linalg.norm(v) + 1e-9)
 
     # using anchors as hazard texts (behavior descriptions)
-    N = _read_texts(cfg["data"]["neutrals"])
-    H = _read_texts(cfg["data"]["anchors"])
+    N = read_jsonl_texts(cfg["data"]["neutrals"], label="neutral")
+    if not N:
+        N = read_jsonl_texts(cfg["data"]["neutrals"])
+    H = read_hazard_anchor_texts(cfg["data"]["anchors"])
+    if not H:
+        raise ValueError(f"No hazard anchor texts found in {cfg['data']['anchors']}")
+    if not N:
+        raise ValueError(f"No neutral texts found in {cfg['data']['neutrals']}")
 
     layer = cfg["drift"]["layer"]
     sN = drift_score(model, tok, N, v, layer, batch_size=args.batch_size)
@@ -211,6 +205,23 @@ def main():
     print(f"Hazard  drift mean: {muH:.6f}")
     print(f"Hazard  drift var:  {varH:.6f}")
     print(f"Drift gap (H-N):    {gap:.6f}")
+
+    summary = {
+        "config": args.config,
+        "probe": args.probe,
+        "out_dir": args.out_dir,
+        "layer": layer,
+        "num_neutral": len(N),
+        "num_hazard": len(H),
+        "neutral_mean": muN,
+        "neutral_var": varN,
+        "hazard_mean": muH,
+        "hazard_var": varH,
+        "drift_gap": gap,
+    }
+    summary_path = args.out_json or os.path.join(args.out_dir, "drift_summary.json")
+    with open(summary_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
 
 
 if __name__ == "__main__":

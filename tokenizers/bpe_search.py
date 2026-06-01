@@ -70,6 +70,9 @@ from transformers import (
 from eval.eval_perplexity import perplexity as eval_ppl
 from eval.eval_drift import drift_score as eval_drift
 from models.embed_remap import EmbeddingRemapper
+from utils.data_io import read_hazard_anchor_texts as read_hazard_anchor_texts_labeled
+from utils.data_io import read_jsonl_texts as read_jsonl_texts_labeled
+from utils.stems import extract_content_stems
 
 
 # ----------------------------
@@ -238,10 +241,7 @@ def extract_hazard_stems(anchors: List[str], min_len: int = 3) -> List[str]:
     """
     stems = set()
     for t in anchors:
-        for w in t.lower().split():
-            w = "".join(ch for ch in w if ch.isalnum())
-            if len(w) >= min_len:
-                stems.add(w)
+        stems.update(extract_content_stems(t, min_len=min_len))
     return sorted(stems)
 
 
@@ -455,6 +455,81 @@ class RiskyMergePruner(CandidateGenerator):
 
         risky_sorted = sorted(risky, key=lambda idx: (-risk_score(idx), idx))
         return sorted(risky_sorted[: min(self.k, len(risky_sorted))])
+
+
+class FrequencyMergePruner(CandidateGenerator):
+    """Prune high-rank merges whose concatenation appears often in neutral text."""
+
+    def __init__(self, neutrals: List[str], prune_k: int, min_hits: int = 5):
+        self.neutral_text = "\n".join(neutrals).lower()
+        self.k = int(prune_k)
+        self.min_hits = int(min_hits)
+
+    @staticmethod
+    def _clean_piece(piece: str) -> str:
+        if piece and piece[0] in ("Ġ", "▁"):
+            piece = piece[1:]
+        return piece.lower()
+
+    def propose(self, merges: List[str]) -> List[int]:
+        scored: list[tuple[int, int]] = []
+        for idx, merge in enumerate(merges):
+            parts = merge.split() if isinstance(merge, str) else list(merge)
+            if len(parts) != 2:
+                continue
+            candidate = self._clean_piece("".join(parts))
+            if len(candidate) < 3:
+                continue
+            hits = self.neutral_text.count(candidate)
+            if hits >= self.min_hits:
+                scored.append((idx, hits))
+        scored.sort(key=lambda x: (-x[1], x[0]))
+        return sorted(idx for idx, _ in scored[: self.k])
+
+
+class RandomMergePruner(CandidateGenerator):
+    """Prune random merges, used as a matched-edit-count baseline."""
+
+    def __init__(self, prune_k: int, seed: int = 9172, min_rank: int = 0):
+        self.k = int(prune_k)
+        self.rng = random.Random(seed)
+        self.min_rank = int(min_rank)
+
+    def propose(self, merges: List[str]) -> List[int]:
+        candidates = list(range(max(0, self.min_rank), len(merges)))
+        self.rng.shuffle(candidates)
+        return sorted(candidates[: min(self.k, len(candidates))])
+
+
+class PseudoHazardMergePruner(RiskyMergePruner):
+    """Use random neutral words as pseudo-hazard stems for a label-shuffled baseline."""
+
+    def __init__(
+        self,
+        true_stems: List[str],
+        neutrals: List[str],
+        min_benign_hits: int,
+        prune_k: int,
+        seed: int = 9172,
+    ):
+        rng = random.Random(seed)
+        true = {s.lower() for s in true_stems}
+        candidates: list[str] = []
+        for text in neutrals:
+            for word in text.lower().split():
+                word = "".join(ch for ch in word if ch.isalnum())
+                if len(word) >= 3 and word not in true:
+                    candidates.append(word)
+        candidates = sorted(set(candidates))
+        rng.shuffle(candidates)
+        pseudo = candidates[: max(1, len(true_stems))]
+        counts = benign_counts_by_stem(neutrals, pseudo)
+        super().__init__(
+            stems=pseudo,
+            benign_counts=counts,
+            min_benign_hits=min_benign_hits,
+            prune_k=prune_k,
+        )
 
 
 # ----------------------------
@@ -726,46 +801,51 @@ class JointScore(ScoreStrategy):
         return v
 
     def score(self, tok: PreTrainedTokenizerFast) -> ScoreResult:
-            """
-            Score a candidate tokenizer by:
-            - quick LoRA warmup,
-            - computing ppl, tpc, and drift,
-            - returning the normalized joint objective J.
+        """
+        Score a candidate tokenizer by:
+        - quick LoRA warmup,
+        - computing ppl, tpc, and drift,
+        - returning the normalized joint objective J.
 
-            Args:
-                tok: Candidate tokenizer to evaluate.
+        Args:
+            tok: Candidate tokenizer to evaluate.
 
-            Returns:
-                ScoreResult(J, ppl, drift, tpc).
-            """
-            model = self._warmup.run(tok, self.u_dev_texts[: self._warmup.steps])
+        Returns:
+            ScoreResult(J, ppl, drift, tpc).
+        """
+        model = self._warmup.run(tok, self.u_dev_texts[: self._warmup.steps])
 
-            ppl = eval_ppl(model, tok, self.u_dev_texts)
-            tpc = tokens_per_char(tok, self.u_dev_texts)
+        ppl = eval_ppl(model, tok, self.u_dev_texts)
+        tpc = tokens_per_char(tok, self.u_dev_texts)
 
-            # Drift diagnostics: neutrals vs anchors (mean projections)
-            _n = eval_drift(model, tok, self.neutrals, self.v, layer=self.drift_layer)
-            _h = eval_drift(model, tok, self.anchors, self.v, layer=self.drift_layer)
-            muN = float(np.mean(_n)) if len(_n) else 0.0
-            muH = float(np.mean(_h)) if len(_h) else 0.0
-            gap = float(muH - muN)
+        # Drift diagnostics: neutrals vs anchors (mean projections)
+        _n = eval_drift(model, tok, self.neutrals, self.v, layer=self.drift_layer)
+        _h = eval_drift(model, tok, self.anchors, self.v, layer=self.drift_layer)
+        muN = float(np.mean(_n)) if len(_n) else 0.0
+        muH = float(np.mean(_h)) if len(_h) else 0.0
+        gap = float(muH - muN)
 
-            # Segmentation instability (boundary flip rate under 1-char edits)
-            stab = seg_flip_rate(
-                tok, self.u_dev_texts,
-                n_texts=self.stab_max_texts,
-                n_ops=self.stab_ops,
-            )
+        # Segmentation instability (boundary flip rate under 1-char edits)
+        stab = seg_flip_rate(
+            tok, self.u_dev_texts,
+            n_texts=self.stab_max_texts,
+            n_ops=self.stab_ops,
+        )
 
-            # Enforce gap retention constraint to avoid degenerate collapse
-            min_gap = max(float(self.gap_min_abs), float(self.gap_min_ratio) * float(self.gap0))
-            violated = (gap < min_gap)
+        # Enforce gap retention constraint to avoid degenerate collapse
+        min_gap = max(float(self.gap_min_abs), float(self.gap_min_ratio) * float(self.gap0))
+        violated = gap < min_gap
 
-            J = (ppl / self.ppl0) + self.alpha * (muN / self.muN0) + self.beta * (tpc / self.tpc0) + self.gamma * (stab / self.stab0)
-            if violated:
-                J = float("inf")
+        J = (
+            (ppl / self.ppl0)
+            + self.alpha * (muN / self.muN0)
+            + self.beta * (tpc / self.tpc0)
+            + self.gamma * (stab / self.stab0)
+        )
+        if violated:
+            J = float("inf")
 
-            return ScoreResult(float(J), float(ppl), float(muN), float(muH), float(gap), float(tpc), float(stab))
+        return ScoreResult(float(J), float(ppl), float(muN), float(muH), float(gap), float(tpc), float(stab))
 
 
 # ----------------------------
@@ -1023,7 +1103,7 @@ def main():
     )
     ap.add_argument("--alpha", type=float, default=0.7, help="Weight for drift term in J")
     ap.add_argument("--beta", type=float, default=0.1, help="Weight for tpc term in J")
-    ap.add_argument("--gamma", type=float, default=0.1, help="Weight for segmentation instability term in J")
+    ap.add_argument("--gamma", type=float, default=0.0, help="Weight for segmentation instability term in J")
 
     # Segmentation stability estimation knobs
     ap.add_argument(
@@ -1051,6 +1131,18 @@ def main():
         type=float,
         default=0.05,
         help="Require (muH - muN) >= gap_min_abs (absolute floor), else reject candidate.",
+    )
+    ap.add_argument(
+        "--baseline",
+        choices=["hazard", "frequency", "random", "shuffled"],
+        default="hazard",
+        help="Candidate proposal strategy. Use random/frequency as matched baselines.",
+    )
+    ap.add_argument(
+        "--random_min_rank",
+        type=int,
+        default=100,
+        help="Lowest merge rank eligible for random-pruning baseline",
     )
     ap.add_argument(
         "--drift_layer", type=int, default=10, help="Layer index for drift projection"
@@ -1086,8 +1178,14 @@ def main():
     set_seeds(args.seed)
     model_name = args.model_name or args.base_tokenizer
 
-    anchors = read_jsonl_texts(args.anchors, limit=args.max_h)
-    neutrals = read_jsonl_texts(args.neutrals, limit=args.max_n)
+    anchors = read_hazard_anchor_texts_labeled(args.anchors, limit=args.max_h)
+    neutrals = read_jsonl_texts_labeled(args.neutrals, label="neutral", limit=args.max_n)
+    if not neutrals:
+        neutrals = read_jsonl_texts_labeled(args.neutrals, limit=args.max_n)
+    if not anchors:
+        raise ValueError(f"No hazard anchor texts found in {args.anchors}")
+    if not neutrals:
+        raise ValueError(f"No neutral texts found in {args.neutrals}")
     u_dev_texts = sample_u_dev(args.u_dev_dataset, args.u_dev_size, seed=args.seed)
 
     stems = extract_hazard_stems(anchors)
@@ -1179,12 +1277,33 @@ def main():
         drift_layer=args.drift_layer,
         warmup_steps=args.warmup_steps,
     )
-    generator = RiskyMergePruner(
-        stems,
-        counts,
-        min_benign_hits=args.min_benign_hits,
-        prune_k=args.prune_k,
-    )
+    if args.baseline == "hazard":
+        generator = RiskyMergePruner(
+            stems,
+            counts,
+            min_benign_hits=args.min_benign_hits,
+            prune_k=args.prune_k,
+        )
+    elif args.baseline == "frequency":
+        generator = FrequencyMergePruner(
+            neutrals,
+            prune_k=args.prune_k,
+            min_hits=args.min_benign_hits,
+        )
+    elif args.baseline == "shuffled":
+        generator = PseudoHazardMergePruner(
+            stems,
+            neutrals,
+            min_benign_hits=args.min_benign_hits,
+            prune_k=args.prune_k,
+            seed=args.seed,
+        )
+    else:
+        generator = RandomMergePruner(
+            prune_k=args.prune_k,
+            seed=args.seed,
+            min_rank=args.random_min_rank,
+        )
 
     search = BPESearch(
         args.base_tokenizer,
@@ -1221,6 +1340,17 @@ def main():
                     "ppl0": float(ppl0),
                     "tpc0": float(tpc0),
                     "drift0": float(drift0),
+                    "muH0": float(muH0),
+                    "gap0": float(gap0),
+                    "stab0": float(stab0),
+                },
+                "config": vars(args),
+                "data": {
+                    "num_hazard_anchors": len(anchors),
+                    "num_neutrals": len(neutrals),
+                    "num_u_dev": len(u_dev_texts),
+                    "num_stems": len(stems),
+                    "proposal_strategy": args.baseline,
                 },
                 "rounds": search.history,
             },

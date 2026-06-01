@@ -9,6 +9,7 @@ import glob
 from transformers import AutoTokenizer, AutoModelForCausalLM, get_cosine_schedule_with_warmup
 from peft import LoraConfig, get_peft_model
 from utils.seeding import set_global_seed, log_run_meta
+from utils.data_io import read_jsonl_texts
 
 # ---------------------------
 # Helpers
@@ -33,22 +34,6 @@ def _ensure_padding(tok):
     tok.padding_side = "right"
 
 
-def _safe_load_jsonl_texts(path):
-    rows = []
-    with open(path, "r", encoding="utf-8") as f:
-        for ln in f:
-            if not ln.strip():
-                continue
-            try:
-                j = json.loads(ln)
-                t = j.get("text", "")
-            except Exception:
-                t = ln
-            if isinstance(t, str) and t.strip():
-                rows.append(t.strip())
-    return rows
-
-
 def _leaf_attr_names(model):
     names = set()
     for n, _ in model.named_modules():
@@ -62,7 +47,7 @@ def _guess_targets(model_name: str, model):
     mt = str(getattr(getattr(model, "config", None), "model_type", "")).lower()
 
     rules = [
-        (("llama", "mistral", "qwen", "qwen2", "gemma", "phi", "phi-3"),
+        (("llama", "mistral", "qwen", "qwen2"),
          ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]),
         (("opt",),
          ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2"]),
@@ -156,19 +141,25 @@ def stream_text_local(spec, max_items=20000):
 # ---------------------------
 
 
-@torch.no_grad()
 def drift_penalty(model, tok, v_vec, texts, layer, margin):
-    v = torch.as_tensor(v_vec, dtype=model.dtype, device=model.device).view(-1)
+    device = next(model.parameters()).device
+    dtype = next(model.parameters()).dtype
+    v = torch.as_tensor(v_vec, dtype=dtype, device=device).view(-1)
+    v = v / (v.norm() + 1e-9)
     scores = []
     for t in texts:
         enc = tok(t, return_tensors="pt", truncation=True, max_length=256, padding=False)
-        enc = {k: v_.to(model.device) for k, v_ in enc.items()}
+        enc = {k: v_.to(device) for k, v_ in enc.items()}
         out = model(**enc, output_hidden_states=True)
         hs = out.hidden_states[layer][0]    # [T, H]
-        h_mean = hs.mean(dim=0)             # [H]
+        if "attention_mask" in enc:
+            mask = enc["attention_mask"][0].to(dtype=hs.dtype).view(-1, 1)
+            h_mean = (hs * mask).sum(dim=0) / mask.sum().clamp_min(1.0)
+        else:
+            h_mean = hs.mean(dim=0)
         s = torch.dot(h_mean, v)
         scores.append(torch.relu(s - margin) ** 2)
-    return torch.stack(scores).mean() if scores else torch.tensor(0.0, device=model.device, dtype=model.dtype)
+    return torch.stack(scores).mean() if scores else torch.tensor(0.0, device=device, dtype=dtype)
 
 
 def _load_probe_vector(probe_path: str | None) -> np.ndarray:
@@ -229,14 +220,20 @@ def main(args):
     log_run_meta(out_dir=args.save, cfg=cfg, extras={"script": "lora_drift"})
 
     dtype, device = _pick_dtype_and_device(cfg.get("precision", ""))
-    tok = AutoTokenizer.from_pretrained(cfg["model_name"], use_fast=True)
+    model_name = cfg["model_name"]
+    tokenizer_name = cfg.get("tokenizer_name", model_name)
+
+    tok = AutoTokenizer.from_pretrained(tokenizer_name, use_fast=True)
     _ensure_padding(tok)
 
     model = AutoModelForCausalLM.from_pretrained(
-        cfg["model_name"], dtype=dtype).to(device).train()
+        model_name, dtype=dtype).to(device).train()
+
+    if model.get_input_embeddings().num_embeddings < len(tok):
+        model.resize_token_embeddings(len(tok))
 
     cfg_targets = cfg.get("lora", {}).get("target_modules")
-    targets = cfg_targets if cfg_targets else _guess_targets(cfg["model_name"], model)
+    targets = cfg_targets if cfg_targets else _guess_targets(model_name, model)
     lcfg = LoraConfig(
         r=int(cfg["lora"]["r"]),
         lora_alpha=int(cfg["lora"]["alpha"]),
@@ -248,7 +245,7 @@ def main(args):
     except ValueError as e:
         raise ValueError(
             f"LoRA target_modules not found in base model. Tried {targets}. "
-            f"Set lora.target_modules in your YAML for {cfg['model_name']}."
+            f"Set lora.target_modules in your YAML for {model_name}."
         ) from e
 
     opt = torch.optim.AdamW(model.parameters(), lr=float(cfg["train"]["lr"]))
@@ -258,10 +255,14 @@ def main(args):
         num_training_steps=int(cfg["train"]["steps"]),
     )
 
-    neutrals = _safe_load_jsonl_texts(cfg["data"]["neutrals"])
+    neutrals = read_jsonl_texts(cfg["data"]["neutrals"], label="neutral")
+    if not neutrals:
+        neutrals = read_jsonl_texts(cfg["data"]["neutrals"])
+    if not neutrals:
+        raise ValueError(f"No neutral texts found in {cfg['data']['neutrals']}")
     probe_path = args.probe or cfg.get("drift", {}).get("probe_path")
     v = _load_probe_vector(probe_path)
-    # v = v / (np.linalg.norm(v) + 1e-9)
+    v = v / (np.linalg.norm(v) + 1e-9)
     stream = stream_text_local(
         cfg["data"]["unlabeled_stream"],
         max_items=int(cfg["eval"]["u_dev_sample"])
@@ -273,6 +274,7 @@ def main(args):
     layer = int(cfg["drift"]["layer"])
     neutrals_slice = neutrals[: max(1, min(64, len(neutrals)))]
 
+    trained_steps = 0
     model.train()
     for step, text in enumerate(stream):
         if step >= steps:
@@ -292,10 +294,29 @@ def main(args):
 
         if step % 50 == 0:
             print(f"step {step} | lm {lm_loss.item():.3f} | drift {drift.item():.3f} | targets={targets}")
+        trained_steps = step + 1
 
     os.makedirs(args.save, exist_ok=True)
     model.save_pretrained(args.save)
     tok.save_pretrained(args.save)
+    with open(os.path.join(args.save, "train_summary.json"), "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "trained_steps": trained_steps,
+                "requested_steps": steps,
+                "model_name": model_name,
+                "tokenizer_name": tokenizer_name,
+                "probe_path": args.probe,
+                "probe_norm": float(np.linalg.norm(v)),
+                "lambda": lam,
+                "margin": margin,
+                "layer": layer,
+                "target_modules": targets,
+                "neutral_penalty_examples": len(neutrals_slice),
+            },
+            f,
+            indent=2,
+        )
     print("Saved LoRA adapter to", args.save)
 
 
