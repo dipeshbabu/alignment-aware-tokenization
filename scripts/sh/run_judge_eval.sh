@@ -8,8 +8,8 @@ OUT=${4:-outputs/jailbreak_pythia410m_judge.json}
 
 if [ -z "${JUDGE_MODEL:-}" ]; then
   echo "Set JUDGE_MODEL to a local or Hugging Face safety judge." >&2
-  echo "Classifier example: JUDGE_MODEL=your-org/your-harmfulness-classifier bash scripts/run_judge_eval.sh" >&2
-  echo "Causal-LM example: JUDGE_TYPE=causal_lm JUDGE_MODEL=your-org/your-chat-judge bash scripts/run_judge_eval.sh" >&2
+  echo "Classifier example: JUDGE_MODEL=your-org/your-harmfulness-classifier bash scripts/sh/run_judge_eval.sh" >&2
+  echo "Causal-LM example: JUDGE_TYPE=causal_lm JUDGE_MODEL=your-org/your-chat-judge bash scripts/sh/run_judge_eval.sh" >&2
   exit 2
 fi
 

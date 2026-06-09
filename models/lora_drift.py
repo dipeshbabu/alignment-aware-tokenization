@@ -10,6 +10,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, get_cosine_schedul
 from peft import LoraConfig, get_peft_model
 from utils.seeding import set_global_seed, log_run_meta
 from utils.data_io import read_jsonl_texts
+from utils.concept import concept_scores_from_pooled, normalize_probe_basis
 
 # ---------------------------
 # Helpers
@@ -141,11 +142,9 @@ def stream_text_local(spec, max_items=20000):
 # ---------------------------
 
 
-def drift_penalty(model, tok, v_vec, texts, layer, margin):
+def drift_penalty(model, tok, probe_basis, texts, layer, margin):
     device = next(model.parameters()).device
     dtype = next(model.parameters()).dtype
-    v = torch.as_tensor(v_vec, dtype=dtype, device=device).view(-1)
-    v = v / (v.norm() + 1e-9)
     scores = []
     for t in texts:
         enc = tok(t, return_tensors="pt", truncation=True, max_length=256, padding=False)
@@ -157,13 +156,13 @@ def drift_penalty(model, tok, v_vec, texts, layer, margin):
             h_mean = (hs * mask).sum(dim=0) / mask.sum().clamp_min(1.0)
         else:
             h_mean = hs.mean(dim=0)
-        s = torch.dot(h_mean, v)
+        s = concept_scores_from_pooled(h_mean.view(1, -1), probe_basis)[0]
         scores.append(torch.relu(s - margin) ** 2)
     return torch.stack(scores).mean() if scores else torch.tensor(0.0, device=device, dtype=dtype)
 
 
 def _load_probe_vector(probe_path: str | None) -> np.ndarray:
-    """Load concept direction vector.
+    """Load a probe basis or hazard subspace.
 
     Supports:
       - .npy saved with numpy
@@ -188,25 +187,25 @@ def _load_probe_vector(probe_path: str | None) -> np.ndarray:
 
         if c.endswith(".npy"):
             v = np.load(c, allow_pickle=True)
-            return np.asarray(v, dtype=np.float32).squeeze()
+            return normalize_probe_basis(v)
 
         if c.endswith(".pt"):
             obj = torch.load(c, map_location="cpu")
             if isinstance(obj, dict):
                 obj = obj.get("v", next(iter(obj.values())))
             if isinstance(obj, torch.Tensor):
-                return obj.detach().cpu().numpy().astype(np.float32).squeeze()
-            return np.asarray(obj, dtype=np.float32).squeeze()
+                return normalize_probe_basis(obj.detach().cpu().numpy().astype(np.float32))
+            return normalize_probe_basis(np.asarray(obj, dtype=np.float32))
 
         # last resort
         try:
             v = np.load(c, allow_pickle=True)
-            return np.asarray(v, dtype=np.float32).squeeze()
+            return normalize_probe_basis(v)
         except Exception:
             continue
 
     raise FileNotFoundError(
-        f"Could not find probe vector. Tried: {candidates}"
+        f"Could not find probe basis. Tried: {candidates}"
     )
 
 # ---------------------------
@@ -255,16 +254,18 @@ def main(args):
         num_training_steps=int(cfg["train"]["steps"]),
     )
 
-    neutrals = read_jsonl_texts(cfg["data"]["neutrals"], label="neutral")
+    neutrals_path = args.neutrals or cfg["data"]["neutrals"]
+    unlabeled_stream = args.unlabeled_stream or cfg["data"]["unlabeled_stream"]
+
+    neutrals = read_jsonl_texts(neutrals_path, label="neutral")
     if not neutrals:
-        neutrals = read_jsonl_texts(cfg["data"]["neutrals"])
+        neutrals = read_jsonl_texts(neutrals_path)
     if not neutrals:
-        raise ValueError(f"No neutral texts found in {cfg['data']['neutrals']}")
+        raise ValueError(f"No neutral texts found in {neutrals_path}")
     probe_path = args.probe or cfg.get("drift", {}).get("probe_path")
     v = _load_probe_vector(probe_path)
-    v = v / (np.linalg.norm(v) + 1e-9)
     stream = stream_text_local(
-        cfg["data"]["unlabeled_stream"],
+        unlabeled_stream,
         max_items=int(cfg["eval"]["u_dev_sample"])
     )
 
@@ -306,7 +307,10 @@ def main(args):
                 "requested_steps": steps,
                 "model_name": model_name,
                 "tokenizer_name": tokenizer_name,
-                "probe_path": args.probe,
+                "neutrals": neutrals_path,
+                "unlabeled_stream": unlabeled_stream,
+                "probe_path": probe_path,
+                "probe_shape": list(v.shape),
                 "probe_norm": float(np.linalg.norm(v)),
                 "lambda": lam,
                 "margin": margin,
@@ -322,7 +326,9 @@ def main(args):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--probe", default=None, help="Path to probe vector (.npy or .pt). Overrides YAML drift.probe_path.")
+    p.add_argument("--probe", default=None, help="Path to probe basis/subspace (.npy or .pt). Overrides YAML drift.probe_path.")
     p.add_argument("--config", required=True)
     p.add_argument("--save", required=True)
+    p.add_argument("--neutrals", default="", help="Optional neutral JSONL override.")
+    p.add_argument("--unlabeled_stream", default="", help="Optional unlabeled stream override.")
     main(p.parse_args())

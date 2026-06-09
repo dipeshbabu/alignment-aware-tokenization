@@ -38,6 +38,7 @@ from transformers import (
     AutoModelForSequenceClassification,
 )
 from transformers.utils import logging as hf_logging
+from utils.concept import concept_scores_from_pooled, normalize_probe_basis
 
 try:
     from peft import PeftModel, PeftConfig
@@ -106,8 +107,7 @@ def load_probe_vector(path: str) -> np.ndarray:
 
     if path.endswith(".npy"):
         v = np.load(path, allow_pickle=True)
-        v = np.asarray(v, dtype=np.float32).reshape(-1)
-        return v
+        return normalize_probe_basis(v)
 
     if path.endswith(".pt"):
         obj = torch.load(path, map_location="cpu")
@@ -118,19 +118,19 @@ def load_probe_vector(path: str) -> np.ndarray:
             else:
                 obj = next(iter(obj.values()))
         if isinstance(obj, torch.Tensor):
-            return obj.detach().cpu().numpy().astype(np.float32).reshape(-1)
-        return np.asarray(obj, dtype=np.float32).reshape(-1)
+            return normalize_probe_basis(obj.detach().cpu().numpy().astype(np.float32))
+        return normalize_probe_basis(np.asarray(obj, dtype=np.float32))
 
     # fallback
     v = np.load(path, allow_pickle=True)
-    return np.asarray(v, dtype=np.float32).reshape(-1)
+    return normalize_probe_basis(v)
 
 
 @torch.no_grad()
 def concept_scores(
     model_feat: AutoModel,
     tok,
-    v_np: np.ndarray,
+    probe_np: np.ndarray,
     texts: List[str],
     layer: int,
     bs: int = 32,
@@ -141,8 +141,6 @@ def concept_scores(
     Uses attention-mask-aware pooling, add_special_tokens=False.
     """
     device = next(model_feat.parameters()).device
-    v = torch.as_tensor(v_np, dtype=torch.float32, device=device).reshape(-1)
-
     out_scores = []
     for i in range(0, len(texts), bs):
         batch = texts[i: i + bs]
@@ -165,7 +163,7 @@ def concept_scores(
         pooled = (h * mask).sum(dim=1) / denom  # [B,H]
         pooled = pooled.to(torch.float32)
 
-        scores = torch.matmul(pooled, v)  # [B]
+        scores = concept_scores_from_pooled(pooled, probe_np)
         out_scores.extend(scores.detach().cpu().tolist())
 
     return np.asarray(out_scores, dtype=np.float32)
@@ -507,9 +505,8 @@ def main():
         except Exception:
             pass
 
-    # probe vector
+    # probe basis or subspace
     v = load_probe_vector(args.probe).astype(np.float32)
-    v /= (np.linalg.norm(v) + 1e-9)
 
     # data
     attack_file = args.attack_file or cfg["attack"]
@@ -687,6 +684,7 @@ def main():
                 "tokenizer_name": tokenizer_name,
                 "adapter": args.adapter,
                 "probe": args.probe,
+                "probe_shape": list(v.shape),
                 "layer": args.layer,
                 "max_new_tokens": args.max_new_tokens,
                 "greedy": args.greedy,

@@ -1,5 +1,5 @@
 model_name: "Qwen/Qwen2-7B"
-tokenizer_name: "tokenizers/spm_hazard/spm_qwen2_7b_hazard_hf"
+tokenizer_name: "tokenizers/native_bpe_qwen2_7b/hazard"
 seed: 9172
 
 precision: "bf16"
@@ -21,7 +21,7 @@ drift:
   probe_path: "probes/qwen2_7b_layer16.npy"
 data:
   unlabeled_stream: "data/unlabeled/u_train.jsonl"
-  anchors: "data/anchors/anchors_500.jsonl"
-  neutrals: "data/neutrals/neutrals_1000.jsonl"
+  anchors: "data/splits/stems_seed9172/anchors_train_stems.jsonl"
+  neutrals: "data/splits/stems_seed9172/neutrals_train_stems.jsonl"
 eval:
   u_dev_sample: 20000

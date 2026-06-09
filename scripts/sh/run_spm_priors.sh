@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Optional SentencePiece tokenizer experiment.
-# Usage: bash scripts/run_spm_priors.sh [llama3|mistral7b|qwen2_7b]
+# Usage: bash scripts/sh/run_spm_priors.sh [llama3|mistral7b|qwen2_7b]
 
 FAMILY="${1:-mistral7b}"
 OUT_DIR="tokenizers/spm_hazard"

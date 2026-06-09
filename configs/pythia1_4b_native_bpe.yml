@@ -1,6 +1,7 @@
 model_name: "EleutherAI/pythia-1.4b"
-tokenizer_name: "EleutherAI/pythia-1.4b"
+tokenizer_name: "tokenizers/native_bpe_pythia1_4b/hazard"
 seed: 9172
+
 precision: "bf16"
 lora:
   r: 16
@@ -13,14 +14,14 @@ train:
   steps: 2500
   warmup_steps: 150
 drift:
-  lambda: 0.0
+  lambda: 0.5
   margin: 0.2
   layer: 11
   rank: 4
   probe_path: "probes/pythia1_4b_layer11.npy"
 data:
   unlabeled_stream: "data/unlabeled/u_train.jsonl"
-  anchors: "data/anchors/anchors_500.jsonl"
-  neutrals: "data/neutrals/neutrals_1000.jsonl"
+  anchors: "data/splits/stems_seed9172/anchors_train_stems.jsonl"
+  neutrals: "data/splits/stems_seed9172/neutrals_train_stems.jsonl"
 eval:
   u_dev_sample: 30000

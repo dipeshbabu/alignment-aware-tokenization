@@ -29,6 +29,7 @@ import yaml
 from peft import PeftModel, PeftConfig
 from transformers import AutoTokenizer, AutoModel
 from utils.data_io import read_hazard_anchor_texts, read_jsonl_texts
+from utils.concept import concept_scores_from_pooled, normalize_probe_basis
 
 
 def _load_with_dtype(model_id: str, dtype: torch.dtype):
@@ -102,7 +103,7 @@ def drift_score(
     model: torch.nn.Module,
     tok,
     texts: List[str],
-    v_np: np.ndarray,
+    probe_np: np.ndarray,
     layer: int,
     batch_size: int = 16,
 ) -> np.ndarray:
@@ -113,7 +114,7 @@ def drift_score(
         model: HF model with `output_hidden_states=True` support.
         tok:   Corresponding tokenizer.
         texts: List of input strings.
-        v_np:  Concept direction as a 1D numpy array.
+        probe_np: Concept direction [D] or hazard subspace [K, D].
         layer: Which hidden-state layer index to probe.
         batch_size: Number of texts per forward pass.
 
@@ -124,10 +125,6 @@ def drift_score(
         return np.empty((0,), dtype=np.float32)
 
     device = next(model.parameters()).device
-
-    # Normalize concept vector on the model device
-    v = torch.as_tensor(v_np, dtype=torch.float32, device=device).view(-1)
-    v = v / (v.norm() + 1e-9)
 
     scores: List[float] = []
     for start in range(0, len(texts), batch_size):
@@ -143,11 +140,10 @@ def drift_score(
         out = model(**enc, output_hidden_states=True)
         # hidden_states[layer]: [B, T, H]
         h = out.hidden_states[layer]
-        # mean-pool across tokens -> [B, H]
-        h_mean = h.mean(dim=1).to(torch.float32)
+        mask = enc["attention_mask"].unsqueeze(-1).to(h.dtype)
+        h_mean = (h * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1.0)
 
-        # dot product with v per example (v is normalized; drift is a scalar projection)
-        sim = (h_mean * v.view(1, -1)).sum(dim=-1)
+        sim = concept_scores_from_pooled(h_mean, probe_np)
         scores.extend(sim.detach().cpu().tolist())
 
     return np.asarray(scores, dtype=np.float32)
@@ -157,6 +153,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
     ap.add_argument("--probe", required=True, help="Concept vector .npy")
+    ap.add_argument("--anchors", default="", help="Optional hazard anchor JSONL override.")
+    ap.add_argument("--neutrals", default="", help="Optional neutral JSONL override.")
     ap.add_argument("--out_dir", default="runs/latest")
     ap.add_argument("--out_json", default="", help="Optional JSON summary path")
     ap.add_argument(
@@ -173,23 +171,23 @@ def main():
 
     model, tok = _load_model_and_tokenizer(cfg)
 
-    # Load and normalize concept vector
-    v = np.load(args.probe, allow_pickle=True).reshape(-1)
-    v = v / (np.linalg.norm(v) + 1e-9)
+    probe = normalize_probe_basis(np.load(args.probe, allow_pickle=True))
 
     # using anchors as hazard texts (behavior descriptions)
-    N = read_jsonl_texts(cfg["data"]["neutrals"], label="neutral")
+    anchors_path = args.anchors or cfg["data"]["anchors"]
+    neutrals_path = args.neutrals or cfg["data"]["neutrals"]
+    N = read_jsonl_texts(neutrals_path, label="neutral")
     if not N:
-        N = read_jsonl_texts(cfg["data"]["neutrals"])
-    H = read_hazard_anchor_texts(cfg["data"]["anchors"])
+        N = read_jsonl_texts(neutrals_path)
+    H = read_hazard_anchor_texts(anchors_path)
     if not H:
-        raise ValueError(f"No hazard anchor texts found in {cfg['data']['anchors']}")
+        raise ValueError(f"No hazard anchor texts found in {anchors_path}")
     if not N:
-        raise ValueError(f"No neutral texts found in {cfg['data']['neutrals']}")
+        raise ValueError(f"No neutral texts found in {neutrals_path}")
 
     layer = cfg["drift"]["layer"]
-    sN = drift_score(model, tok, N, v, layer, batch_size=args.batch_size)
-    sH = drift_score(model, tok, H, v, layer, batch_size=args.batch_size)
+    sN = drift_score(model, tok, N, probe, layer, batch_size=args.batch_size)
+    sH = drift_score(model, tok, H, probe, layer, batch_size=args.batch_size)
 
     np.save(os.path.join(args.out_dir, "drift_neutral.npy"), sN)
     np.save(os.path.join(args.out_dir, "drift_hazard.npy"), sH)
@@ -209,6 +207,9 @@ def main():
     summary = {
         "config": args.config,
         "probe": args.probe,
+        "probe_shape": list(probe.shape),
+        "anchors": anchors_path,
+        "neutrals": neutrals_path,
         "out_dir": args.out_dir,
         "layer": layer,
         "num_neutral": len(N),

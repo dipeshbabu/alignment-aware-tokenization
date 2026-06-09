@@ -18,6 +18,7 @@ def main() -> None:
         description="Create train/held-out hazard stem splits and filtered anchor files."
     )
     parser.add_argument("--anchors", required=True)
+    parser.add_argument("--neutrals", default="")
     parser.add_argument("--out_dir", required=True)
     parser.add_argument("--heldout_frac", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=9172)
@@ -83,6 +84,31 @@ def main() -> None:
     write_jsonl(out_dir / "anchors_train_stems.jsonl", train_rows)
     write_jsonl(out_dir / "anchors_heldout_stems.jsonl", heldout_rows)
     write_jsonl(out_dir / "anchors_mixed_stems.jsonl", [row for row, _ in mixed_rows])
+
+    neutral_train_rows = []
+    neutral_heldout_rows = []
+    neutral_mixed_rows = []
+    if args.neutrals:
+        for row in iter_jsonl_records(args.neutrals):
+            text = extract_text(row)
+            if not text:
+                continue
+            row_stems = stems_for_text(text, args.min_stem_len)
+            hits_train = bool(row_stems & train_stems)
+            hits_heldout = bool(row_stems & heldout_stems)
+            if hits_heldout and not hits_train:
+                neutral_heldout_rows.append(row)
+            elif hits_train and not hits_heldout:
+                neutral_train_rows.append(row)
+            elif hits_train and hits_heldout:
+                neutral_mixed_rows.append(row)
+            else:
+                # Keep stem-unrelated neutrals available for training.
+                neutral_train_rows.append(row)
+
+        write_jsonl(out_dir / "neutrals_train_stems.jsonl", neutral_train_rows)
+        write_jsonl(out_dir / "neutrals_heldout_stems.jsonl", neutral_heldout_rows)
+        write_jsonl(out_dir / "neutrals_mixed_stems.jsonl", neutral_mixed_rows)
     (out_dir / "train_stems.json").write_text(
         json.dumps(sorted(train_stems), indent=2), encoding="utf-8"
     )
@@ -102,6 +128,10 @@ def main() -> None:
                 "num_train_rows": len(train_rows),
                 "num_heldout_rows": len(heldout_rows),
                 "num_mixed_rows_excluded": len(mixed_rows),
+                "neutrals": args.neutrals or None,
+                "num_neutral_train_rows": len(neutral_train_rows),
+                "num_neutral_heldout_rows": len(neutral_heldout_rows),
+                "num_neutral_mixed_rows": len(neutral_mixed_rows),
             },
             indent=2,
         ),

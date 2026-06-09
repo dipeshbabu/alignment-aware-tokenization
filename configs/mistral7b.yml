@@ -1,5 +1,6 @@
 model_name: "mistralai/Mistral-7B-v0.1"
 tokenizer_name: "mistralai/Mistral-7B-v0.1"
+seed: 9172
 
 precision: "bf16"
 lora:
@@ -16,6 +17,8 @@ drift:
   lambda: 5.0
   margin: 0.2
   layer: 16
+  rank: 4
+  probe_path: "probes/mistral7b_layer16.npy"
 data:
   unlabeled_stream: "data/unlabeled/u_train.jsonl"
   anchors: "data/anchors/anchors_500.jsonl"

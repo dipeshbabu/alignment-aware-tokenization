@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Label-efficiency runs for frozen-feature hazard probes.
-# Usage: bash scripts/run_label_efficiency.sh [config] [out_json] [budgets...]
+# Usage: bash scripts/sh/run_label_efficiency.sh [config] [out_json] [budgets...]
 
 CONFIG=${1:-configs/pythia410m.yml}
 OUT=${2:-outputs/label_efficiency_pythia410m.json}

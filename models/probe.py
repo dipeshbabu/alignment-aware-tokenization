@@ -9,6 +9,7 @@ from transformers import AutoTokenizer, AutoModel
 from sklearn.linear_model import LogisticRegression
 from utils.seeding import set_global_seed, log_run_meta
 from utils.data_io import read_hazard_anchor_texts, read_jsonl_texts
+from utils.concept import append_residual_axes, normalize_probe_basis
 
 
 def pick_dtype(precision: str, device: torch.device):
@@ -118,14 +119,16 @@ def main(args):
         model = PeftModel.from_pretrained(base_model, model_id)
         model = model.to(device).eval()
 
-    H = read_hazard_anchor_texts(cfg["data"]["anchors"])
-    N = read_jsonl_texts(cfg["data"]["neutrals"], label="neutral")
+    anchors_path = args.anchors or cfg["data"]["anchors"]
+    neutrals_path = args.neutrals or cfg["data"]["neutrals"]
+    H = read_hazard_anchor_texts(anchors_path)
+    N = read_jsonl_texts(neutrals_path, label="neutral")
     if not N:
-        N = read_jsonl_texts(cfg["data"]["neutrals"])
+        N = read_jsonl_texts(neutrals_path)
     if not H:
-        raise ValueError(f"No hazard anchor texts found in {cfg['data']['anchors']}")
+        raise ValueError(f"No hazard anchor texts found in {anchors_path}")
     if not N:
-        raise ValueError(f"No neutral texts found in {cfg['data']['neutrals']}")
+        raise ValueError(f"No neutral texts found in {neutrals_path}")
 
     # determine valid layer index
     tmp = tok("hi", return_tensors="pt").to(device)
@@ -156,20 +159,29 @@ def main(args):
     clf = LogisticRegression(max_iter=500, solver="lbfgs").fit(X, y)
     v = clf.coef_.astype(np.float32)[0]
     v /= (np.linalg.norm(v) + 1e-12)
+    rank = int(args.rank or cfg.get("drift", {}).get("rank", 1))
+    rank = max(1, min(rank, X.shape[1], len(H)))
+    basis = append_residual_axes([v], XH, XN, rank=rank)
+    save_obj = basis[0] if rank == 1 else normalize_probe_basis(basis)
 
     save_dir = os.path.dirname(args.save)
     if save_dir:
         os.makedirs(save_dir, exist_ok=True)
-    np.save(args.save, v)
+    np.save(args.save, save_obj.astype(np.float32))
     print(
-        f"Saved concept vector to {args.save} (dim={v.shape[0]}, device={model.device}, dtype=float32, layer={layer}, batch={batch}, max_len={max_len})")
+        f"Saved concept {'vector' if rank == 1 else 'subspace'} to {args.save} "
+        f"(shape={save_obj.shape}, rank={rank}, device={model.device}, dtype=float32, "
+        f"layer={layer}, batch={batch}, max_len={max_len}, anchors={anchors_path}, neutrals={neutrals_path})")
 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--config", required=True)
     p.add_argument("--save", required=True)
+    p.add_argument("--anchors", default="", help="Optional anchor JSONL override.")
+    p.add_argument("--neutrals", default="", help="Optional neutral JSONL override.")
     p.add_argument("--batch", type=int, default=8,
                    help="encode batch size (defaults to 8 for 4GB GPUs)")
     p.add_argument("--max_len", type=int, default=128, help="encode max_length (defaults to 128)")
+    p.add_argument("--rank", type=int, default=0, help="Hazard subspace rank. Defaults to config drift.rank or 1.")
     main(p.parse_args())

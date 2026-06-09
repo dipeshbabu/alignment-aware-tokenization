@@ -16,6 +16,7 @@ python -m py_compile \
   eval/eval_perplexity.py \
   eval/seg_stability.py \
   eval/tokenizer_spillover.py \
+  tokenizers/bpe_dropout.py \
   tokenizers/bpe_search.py \
   tokenizers/spm_priors.py \
   data_tools/build_tokspill.py \
@@ -23,16 +24,23 @@ python -m py_compile \
   data_tools/perturb_attacks.py \
   scripts/collect_results.py \
   scripts/make_paper_tables.py \
+  scripts/run_lora_drift_native_bpe.py \
+  scripts/summarize_acceptance_results.py \
   scripts/validate_data.py
 
 bash -n \
-  scripts/run_label_efficiency.sh \
-  scripts/run_judge_eval.sh \
-  scripts/run_bpe_baselines.sh \
-  scripts/run_lora_drift_spm.sh \
-  scripts/run_probes_spm.sh \
-  scripts/run_spm_priors.sh \
-  scripts/run_tokenizer_metrics.sh
+  scripts/sh/run_label_efficiency.sh \
+  scripts/sh/run_judge_eval.sh \
+  scripts/sh/run_bpe_baselines.sh \
+  scripts/sh/run_lora_drift_spm.sh \
+  scripts/sh/run_lora_drift_native_bpe.sh \
+  scripts/sh/run_probes_spm.sh \
+  scripts/sh/run_spm_priors.sh \
+  scripts/sh/run_tokenizer_metrics.sh \
+  scripts/sh/reproduce_main.sh \
+  scripts/sh/run_all.sh \
+  scripts/sh/run_acceptance_evals.sh \
+  scripts/sh/run_native_bpe_search.sh
 
-bash scripts/run_judge_eval.sh >/tmp/aat_judge_help.log 2>&1 && exit 1 || true
+bash scripts/sh/run_judge_eval.sh >/tmp/aat_judge_help.log 2>&1 && exit 1 || true
 grep -q "Set JUDGE_MODEL" /tmp/aat_judge_help.log

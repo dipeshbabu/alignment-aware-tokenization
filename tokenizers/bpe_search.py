@@ -72,6 +72,7 @@ from eval.eval_drift import drift_score as eval_drift
 from models.embed_remap import EmbeddingRemapper
 from utils.data_io import read_hazard_anchor_texts as read_hazard_anchor_texts_labeled
 from utils.data_io import read_jsonl_texts as read_jsonl_texts_labeled
+from utils.concept import normalize_probe_basis
 from utils.stems import extract_content_stems
 
 
@@ -729,7 +730,7 @@ class JointScore(ScoreStrategy):
         model_name:   Model id to load for warmup + scoring.
         u_dev_texts:  Held-out texts for ppl/tpc.
         neutrals:     Neutral look-alikes for drift.
-        v_path:       Path to probe vector (NumPy .npy or same saved as .pt.npy).
+        v_path:       Path to probe basis/subspace (NumPy .npy or same saved as .pt.npy).
         alpha:        Weight for drift term.
         beta:         Weight for tpc term.
         ppl0:         Baseline ppl (normalizer).
@@ -783,7 +784,7 @@ class JointScore(ScoreStrategy):
 
     @staticmethod
     def _load_v(path: str) -> np.ndarray:
-        """Load and L2-normalize concept vector `v`."""
+        """Load and normalize a probe basis or hazard subspace."""
         cand = []
         cand.append(path)
         if not path.endswith(".npy"):
@@ -791,14 +792,10 @@ class JointScore(ScoreStrategy):
         for p in cand:
             if os.path.exists(p):
                 v = np.load(p, allow_pickle=True)
-                v = np.asarray(v, dtype=np.float32).reshape(-1)
-                v = v / (np.linalg.norm(v) + 1e-9)
-                return v
+                return normalize_probe_basis(v)
         # last resort
         v = np.load(path, allow_pickle=True)
-        v = np.asarray(v, dtype=np.float32).reshape(-1)
-        v = v / (np.linalg.norm(v) + 1e-9)
-        return v
+        return normalize_probe_basis(v)
 
     def score(self, tok: PreTrainedTokenizerFast) -> ScoreResult:
         """
@@ -1079,6 +1076,16 @@ def main():
         "--neutrals", required=True, help="JSONL with {text: ...} neutral look-alikes"
     )
     ap.add_argument(
+        "--eval_anchors",
+        default="",
+        help="Optional held-out hazard anchor JSONL for final drift reporting only.",
+    )
+    ap.add_argument(
+        "--eval_neutrals",
+        default="",
+        help="Optional held-out neutral JSONL for final drift reporting only.",
+    )
+    ap.add_argument(
         "--u_dev_dataset",
         default="data/unlabeled/u_dev.jsonl",
         help="Local JSONL file/dir/glob for unlabeled dev texts (no HF datasets).",
@@ -1089,7 +1096,7 @@ def main():
     ap.add_argument(
         "--probe",
         required=True,
-        help="Path to concept vector (npy or pt saved as npy)",
+        help="Path to probe basis/subspace (npy or pt saved as npy)",
     )
     ap.add_argument("--rounds", type=int, default=5, help="Search rounds")
     ap.add_argument(
@@ -1217,14 +1224,14 @@ def main():
     ppl0 = eval_ppl(base_model, base_tok, u_dev_texts)
     tpc0 = tokens_per_char(base_tok, u_dev_texts)
 
-    # load concept vector
+    # load probe basis or hazard subspace
     def load_probe_vector(path: str) -> np.ndarray:
         if not os.path.exists(path):
             raise FileNotFoundError(f"Probe not found: {path}")
 
         if path.endswith(".npy"):
             v = np.load(path, allow_pickle=True)
-            return np.asarray(v, dtype=np.float32).reshape(-1)
+            return normalize_probe_basis(v)
 
         if path.endswith(".pt"):
             obj = torch.load(path, map_location="cpu")
@@ -1234,14 +1241,13 @@ def main():
                 else:
                     obj = next(iter(obj.values()))
             if isinstance(obj, torch.Tensor):
-                return obj.detach().cpu().numpy().astype(np.float32).reshape(-1)
-            return np.asarray(obj, dtype=np.float32).reshape(-1)
+                return normalize_probe_basis(obj.detach().cpu().numpy().astype(np.float32))
+            return normalize_probe_basis(np.asarray(obj, dtype=np.float32))
 
         v = np.load(path, allow_pickle=True)
-        return np.asarray(v, dtype=np.float32).reshape(-1)
+        return normalize_probe_basis(v)
 
     v = load_probe_vector(args.probe)
-    v = v / (np.linalg.norm(v) + 1e-9)
 
     _drift0_arr = eval_drift(base_model, base_tok, neutrals, v, layer=args.drift_layer)
     drift0 = float(np.mean(_drift0_arr)) if len(_drift0_arr) else 0.0
@@ -1325,11 +1331,48 @@ def main():
     out_dir = Path(args.out)
     editor = search.editor
     editor.write_edited(best_merges, out_dir)
+    best_tok_for_eval = AutoTokenizer.from_pretrained(str(out_dir), use_fast=True)
+    if best_tok_for_eval.pad_token_id is None:
+        best_tok_for_eval.pad_token = best_tok_for_eval.eos_token or best_tok_for_eval.unk_token
+    best_tok_for_eval.padding_side = "right"
     print(f"[done] wrote searched tokenizer to: {out_dir}")
     print(
         f"[best] J={best_score.J:.4f} | ppl={best_score.ppl:.3f} | "
         f"muN={best_score.muN:.5f} | muH={best_score.muH:.5f} | gap={best_score.gap:.5f} | tpc={best_score.tpc:.5f} | stab={best_score.stab:.5f}"
     )
+
+    heldout_eval = None
+    if args.eval_anchors or args.eval_neutrals:
+        eval_H = (
+            read_hazard_anchor_texts_labeled(args.eval_anchors, limit=args.max_h)
+            if args.eval_anchors
+            else []
+        )
+        eval_N = (
+            read_jsonl_texts_labeled(args.eval_neutrals, label="neutral", limit=args.max_n)
+            if args.eval_neutrals
+            else []
+        )
+        if args.eval_neutrals and not eval_N:
+            eval_N = read_jsonl_texts_labeled(args.eval_neutrals, limit=args.max_n)
+
+        sH_eval = eval_drift(base_model, best_tok_for_eval, eval_H, v, layer=args.drift_layer) if eval_H else np.array([])
+        sN_eval = eval_drift(base_model, best_tok_for_eval, eval_N, v, layer=args.drift_layer) if eval_N else np.array([])
+        muH_eval = float(np.mean(sH_eval)) if len(sH_eval) else 0.0
+        muN_eval = float(np.mean(sN_eval)) if len(sN_eval) else 0.0
+        heldout_eval = {
+            "eval_anchors": args.eval_anchors or None,
+            "eval_neutrals": args.eval_neutrals or None,
+            "num_eval_hazard": int(len(eval_H)),
+            "num_eval_neutral": int(len(eval_N)),
+            "hazard_mean": muH_eval,
+            "neutral_mean": muN_eval,
+            "drift_gap": float(muH_eval - muN_eval),
+        }
+        print(
+            f"[heldout] H={len(eval_H)} N={len(eval_N)} | "
+            f"muN={muN_eval:.5f} | muH={muH_eval:.5f} | gap={muH_eval - muN_eval:.5f}"
+        )
 
     # Round-by-round JSON log (for tables / plots)
     log_path = out_dir / "bpe_search_log.json"
@@ -1352,6 +1395,7 @@ def main():
                     "num_stems": len(stems),
                     "proposal_strategy": args.baseline,
                 },
+                "heldout_eval": heldout_eval,
                 "rounds": search.history,
             },
             f,
