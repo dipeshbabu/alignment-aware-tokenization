@@ -2,11 +2,28 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+
+# macOS metadata
 .DS_Store
+**/.DS_Store
+.AppleDouble
+.LSOverride
 
 adapters/
 outputs/
 runs/
+
+# Generated/curated experiment data. Rebuild with scripts/sh/curate_data.sh.
+data/**/*.jsonl
+data/**/*.json
+data/**/*.csv
+data/**/.gitattributes
+data/splits/
+data/tokspill/
+!data/README.md
+!data/MANIFEST.md
+!data/**/.gitkeep
+
 paper/*.aux
 paper/*.bbl
 paper/*.blg

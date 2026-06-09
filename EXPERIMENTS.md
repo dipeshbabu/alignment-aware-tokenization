@@ -6,8 +6,12 @@ Run commands from the repository root.
 
 ```bash
 uv sync
+uv run bash scripts/sh/curate_data.sh
 uv run bash scripts/sh/run_all.sh lightweight
 ```
+
+Generated/curated data is not tracked in git. Use `QUICK=1` for a small local
+smoke-test dataset before running full curation.
 
 Use the single shell entry point for the full pipeline:
 
@@ -26,8 +30,7 @@ evaluation are intended:
 AAT_HEAVY=1 uv run bash scripts/sh/reproduce_main.sh
 ```
 
-The current checked-in data is a small/local snapshot. Before paper runs, verify
-that counts match the paper claims:
+Before paper runs, verify that locally curated counts match the paper claims:
 
 ```bash
 uv run python -m scripts.validate_data \

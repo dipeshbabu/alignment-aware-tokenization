@@ -9,6 +9,38 @@ cd "$ROOT"
 
 mkdir -p outputs runs probes adapters tokenizers
 
+required_data=(
+  data/anchors/anchors_500.jsonl
+  data/neutrals/neutrals_1000.jsonl
+  data/eval/attack_extra_500.jsonl
+  data/eval/benign_1500.jsonl
+  data/unlabeled/u_train.jsonl
+  data/unlabeled/u_dev.jsonl
+)
+
+missing_data=()
+for path in "${required_data[@]}"; do
+  if [[ ! -f "$path" ]]; then
+    missing_data+=("$path")
+  fi
+done
+
+if [[ "${#missing_data[@]}" -gt 0 ]]; then
+  printf '[data] Missing generated data files:\n' >&2
+  printf '  %s\n' "${missing_data[@]}" >&2
+  cat >&2 <<'MSG'
+
+Generated/curated data is not tracked in git. Rebuild it with:
+
+  uv run bash scripts/sh/curate_data.sh
+
+For a small smoke test:
+
+  QUICK=1 uv run bash scripts/sh/curate_data.sh
+MSG
+  exit 2
+fi
+
 echo "[1/4] Sanity checks and data validation"
 uv run bash scripts/sh/run_sanity.sh
 

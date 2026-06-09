@@ -16,9 +16,10 @@ Use `uv` from the repository root:
 uv sync
 ```
 
-Run commands through the project environment:
+Curate the local data files, then run commands through the project environment:
 
 ```bash
+uv run bash scripts/sh/curate_data.sh
 uv run python -m scripts.validate_data \
   data/anchors/anchors_500.jsonl \
   data/neutrals/neutrals_1000.jsonl \
@@ -36,20 +37,16 @@ uv sync
 ## Sanity Check
 
 ```bash
+uv run bash scripts/sh/curate_data.sh
 uv run bash scripts/sh/run_all.sh lightweight
 ```
 
-This validates the checked-in data snapshot and compiles the Python entry points.
+Generated/curated experiment data is not tracked in git. The curation command
+rebuilds local JSONL data under `data/`; use `QUICK=1` for a small smoke-test
+dataset. The lightweight run validates the local data snapshot and compiles the
+Python entry points.
 
-Current local data snapshot:
-
-- `data/anchors/anchors_500.jsonl`: 234 rows, 109 labeled `hazard`
-- `data/neutrals/neutrals_1000.jsonl`: 157 rows
-- `data/eval/attack_extra_500.jsonl`: 280 rows
-- `data/eval/benign_1500.jsonl`: 1500 rows
-
-Do not claim 500 anchors or 1000 neutrals in a paper unless those files are
-regenerated or replaced.
+See `data/MANIFEST.md` for expected generated files and provenance notes.
 
 ## Reproducibility Entry Points
 
