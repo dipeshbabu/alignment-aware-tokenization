@@ -14,8 +14,10 @@ cd "$ROOT"
 : "${JAILBREAKBENCH_DIR:=}"
 : "${XSTEST_FILE:=}"
 : "${JUDGE_MODEL:=}"
+: "${SETTING_NAME:=adhoc}"
 : "${MODEL_NAME:=EleutherAI/pythia-410m}"
 : "${TOKENIZER_NAME:=$MODEL_NAME}"
+: "${ADAPTER:=}"
 : "${PROBE:=probes/pythia410m_layer10.npy}"
 : "${OUT_DIR:=outputs/acceptance}"
 : "${HARMBENCH_CMD:=}"
@@ -41,7 +43,15 @@ MSG
   exit 2
 fi
 
-echo "[acceptance] model=$MODEL_NAME tokenizer=$TOKENIZER_NAME judge=$JUDGE_MODEL"
+echo "[acceptance] setting=$SETTING_NAME model=$MODEL_NAME tokenizer=$TOKENIZER_NAME adapter=${ADAPTER:-none} judge=$JUDGE_MODEL"
+
+export AAT_SETTING_NAME="$SETTING_NAME"
+export AAT_MODEL_NAME="$MODEL_NAME"
+export AAT_TOKENIZER_NAME="$TOKENIZER_NAME"
+export AAT_ADAPTER="$ADAPTER"
+export AAT_PROBE="$PROBE"
+export AAT_OUT_DIR="$OUT_DIR"
+export AAT_JUDGE_MODEL="$JUDGE_MODEL"
 
 if [[ -n "$HARMBENCH_DIR" ]]; then
   echo "[acceptance] HarmBench checkout: $HARMBENCH_DIR"
@@ -83,11 +93,17 @@ if [[ -n "$XSTEST_FILE" ]]; then
 fi
 
 echo "[acceptance] Also run the internal proxy for mediation diagnostics."
+adapter_args=()
+if [[ -n "$ADAPTER" ]]; then
+  adapter_args=(--adapter "$ADAPTER")
+fi
+
 uv run python -m eval.eval_jailbreak \
   --config configs/llm_eval.yml \
   --probe "$PROBE" \
   --model_name "$MODEL_NAME" \
   --tokenizer_name "$TOKENIZER_NAME" \
+  "${adapter_args[@]}" \
   --judge_model "$JUDGE_MODEL" \
   --judge_type "${JUDGE_TYPE:-classifier}" \
   --judge_harm_label "${JUDGE_HARM_LABEL:-HARMFUL}" \
@@ -100,8 +116,23 @@ uv run python -m eval.eval_jailbreak \
   --refusal_window 200 --dedup_attacks \
   --out "$OUT_DIR/internal_proxy_with_external_judge.json"
 
+cat > "$OUT_DIR/acceptance_run_metadata.json" <<JSON
+{
+  "setting_name": "$SETTING_NAME",
+  "model_name": "$MODEL_NAME",
+  "tokenizer_name": "$TOKENIZER_NAME",
+  "adapter": "$ADAPTER",
+  "probe": "$PROBE",
+  "judge_model": "$JUDGE_MODEL",
+  "judge_type": "${JUDGE_TYPE:-classifier}",
+  "harmbench_dir": "$HARMBENCH_DIR",
+  "jailbreakbench_dir": "$JAILBREAKBENCH_DIR",
+  "xstest_file": "$XSTEST_FILE"
+}
+JSON
+
 json_files=()
-for candidate in "$OUT_DIR/harmbench.json" "$OUT_DIR/jailbreakbench.json" "$OUT_DIR/xstest.json" "$OUT_DIR/internal_proxy_with_external_judge.json"; do
+for candidate in "$OUT_DIR/harmbench.json" "$OUT_DIR/jailbreakbench.json" "$OUT_DIR/xstest.json" "$OUT_DIR/internal_proxy_with_external_judge.json" "$OUT_DIR/acceptance_run_metadata.json"; do
   if [[ -f "$candidate" ]]; then
     json_files+=("$candidate")
   fi

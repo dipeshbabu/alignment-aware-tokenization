@@ -24,7 +24,9 @@ python -m py_compile \
   data_tools/perturb_attacks.py \
   scripts/collect_results.py \
   scripts/make_paper_tables.py \
+  scripts/merge_acceptance_summaries.py \
   scripts/run_lora_drift_native_bpe.py \
+  scripts/run_xstest_external.py \
   scripts/summarize_acceptance_results.py \
   scripts/validate_data.py
 
@@ -40,6 +42,8 @@ bash -n \
   scripts/sh/reproduce_main.sh \
   scripts/sh/run_all.sh \
   scripts/sh/run_acceptance_evals.sh \
+  scripts/sh/run_acceptance_matrix.sh \
+  scripts/sh/curate_data.sh \
   scripts/sh/run_native_bpe_search.sh
 
 bash scripts/sh/run_judge_eval.sh >/tmp/aat_judge_help.log 2>&1 && exit 1 || true

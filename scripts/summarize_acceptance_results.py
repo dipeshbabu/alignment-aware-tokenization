@@ -8,6 +8,26 @@ from typing import Any
 
 
 METRIC_ALIASES = {
+    "setting_name": [
+        "setting_name",
+        "config.setting_name",
+    ],
+    "model_name": [
+        "model_name",
+        "config.model_name",
+    ],
+    "tokenizer_name": [
+        "tokenizer_name",
+        "config.tokenizer_name",
+    ],
+    "adapter": [
+        "adapter",
+        "config.adapter",
+    ],
+    "judge_model": [
+        "judge_model",
+        "config.judge_model",
+    ],
     "attack_success_rate": [
         "attack_success_rate",
         "asr",
@@ -87,6 +107,11 @@ def main() -> None:
             fieldnames=[
                 "file",
                 "benchmark",
+                "setting_name",
+                "model_name",
+                "tokenizer_name",
+                "adapter",
+                "judge_model",
                 "attack_success_rate",
                 "over_refusal_rate",
                 "helpfulness",

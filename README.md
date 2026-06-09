@@ -72,14 +72,16 @@ AAT_HEAVY=1 uv run bash scripts/sh/reproduce_main.sh
 Acceptance-target safety evaluation requires external benchmarks and a judge:
 
 ```bash
-JUDGE_MODEL=your-org/your-harmfulness-judge \
-HARMBENCH_DIR=/path/to/HarmBench \
-HARMBENCH_CMD='cd /path/to/HarmBench && bash your_eval_command.sh' \
-uv run bash scripts/sh/run_acceptance_evals.sh
+cp configs/acceptance.env.example configs/acceptance.env
+# edit configs/acceptance.env, then:
+source configs/acceptance.env
+uv run bash scripts/sh/run_acceptance_matrix.sh
 ```
 
 The internal jailbreak proxy is a diagnostic. A final safety claim should be
-validated with external safety and over-refusal benchmarks.
+validated with external safety and over-refusal benchmarks. Use benchmark-native
+judges for official HarmBench/JailbreakBench metrics, and use the configured
+`JUDGE_MODEL` only as an independent diagnostic cross-check.
 
 Family-native BPE/token-rank interventions for BPE-style tokenizers:
 

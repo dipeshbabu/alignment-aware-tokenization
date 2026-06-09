@@ -471,7 +471,7 @@ def main():
             except Exception:
                 pass
         gen = PeftModel.from_pretrained(gen, args.adapter).eval()
-        feat = PeftModel.from_pretrained(feat, args.adapter).eval()
+        feat = gen
 
     # generation config padding
     try:

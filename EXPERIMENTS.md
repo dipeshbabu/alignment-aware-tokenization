@@ -275,17 +275,16 @@ Acceptance-target safety evaluation should use external benchmark checkouts, not
 only the internal proxy:
 
 ```bash
-JUDGE_MODEL=your-org/your-harmfulness-judge \
-HARMBENCH_DIR=/path/to/HarmBench \
-JAILBREAKBENCH_DIR=/path/to/jailbreakbench \
-HARMBENCH_CMD='cd /path/to/HarmBench && bash your_eval_command.sh' \
-JAILBREAKBENCH_CMD='cd /path/to/jailbreakbench && bash your_eval_command.sh' \
-uv run bash scripts/sh/run_acceptance_evals.sh
+cp configs/acceptance.env.example configs/acceptance.env
+# edit configs/acceptance.env with benchmark checkout paths and commands
+source configs/acceptance.env
+uv run bash scripts/sh/run_acceptance_matrix.sh
 ```
 
-The acceptance script verifies that external benchmark commands write
-`outputs/acceptance/harmbench.json`, `jailbreakbench.json`, or `xstest.json`,
-then normalizes available metrics into `outputs/acceptance/acceptance_summary.csv`.
+The matrix runner evaluates baseline, drift-only, native-BPE, and
+native-BPE-plus-drift settings. Each setting writes benchmark JSON under
+`outputs/acceptance/<setting>/`; summaries are merged into
+`outputs/acceptance/acceptance_matrix_summary.csv`.
 
 ## 7. Collect Tables
 
